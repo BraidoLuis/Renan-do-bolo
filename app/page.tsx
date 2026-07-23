@@ -4,11 +4,39 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./lib/supabase";
 
 type Screen = "Visão geral" | "Pedidos" | "Orçamentos" | "Produção" | "Cardápio" | "Estoque" | "Clientes" | "Financeiro" | "Relatórios" | "Configurações";
+
 type Role = "admin" | "client";
+
+type ClientOrderItemRow = {
+  id: string;
+  product_name: string;
+  unit_price: number | string;
+  quantity: number;
+  customization: Record<string, string>;
+};
+
+type ClientOrderRow = {
+  id: string;
+  order_number: number | string;
+  status: string;
+  payment_status: string;
+  total_amount: number | string;
+  delivery_date: string | null;
+  delivery_time: string | null;
+  request_type: string | null;
+  request_status: string | null;
+  requested_delivery_date: string | null;
+  requested_delivery_time: string | null;
+  request_reason: string | null;
+  created_at: string;
+  order_items: ClientOrderItemRow[];
+};
+
 type UserProfile = {
   full_name: string;
   role: Role;
 };
+
 type Product = {
   id: string | number;
   name: string;
@@ -27,6 +55,7 @@ type Product = {
   customizable: boolean;
   options: string[];
 };
+
 type ProductRow = {
   id: string;
   name: string;
@@ -49,10 +78,22 @@ type ProductRow = {
   }[];
 };
 
+type OrderCreationResult =
+  | {
+      success: true;
+      orderNumber: number;
+    }
+  | {
+      success: false;
+      message: string;
+    };
+
 type CartItem = { product: Product; quantity: number };
+
 type Quote = { id: string; client: string; item: string; details: string; value: string; status: string; date: string };
 
 function priceNumber(price: string) { return Number(price.replace(/[^\d,]/g, "").replace(",", ".")) || 0 }
+
 function databasePrice(value: string) {
   const sanitized = value
     .replace(/[^\d,.]/g, "")
@@ -83,6 +124,23 @@ function getProductImagePath(
       markerPosition + marker.length
     )
   );
+}
+
+function getNextFeaturedOrder(
+  products: Product[]
+) {
+  const highestOrder = products.reduce(
+    (highest, product) =>
+      product.featured
+        ? Math.max(
+            highest,
+            product.featuredOrder
+          )
+        : highest,
+    0
+  );
+
+  return highestOrder + 1;
 }
 
 function money(value: number) { return value.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }) }
@@ -123,6 +181,43 @@ function mapProduct(row: ProductRow): Product {
       )
     ),
   };
+}
+
+function orderStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    pending: "Aguardando",
+    confirmed: "Confirmado",
+    awaiting_payment: "Aguardando pagamento",
+    in_production: "Em produção",
+    ready: "Pronto",
+    completed: "Entregue",
+    cancelled: "Cancelado",
+  };
+
+  return labels[status] || status;
+}
+
+function formatOrderDate(date: string) {
+  return new Date(date).toLocaleDateString(
+    "pt-BR",
+    {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    }
+  );
+}
+
+function formatDeliveryDate(
+  date: string | null
+) {
+  if (!date) {
+    return "Data a combinar";
+  }
+
+  return new Date(
+    `${date}T12:00:00`
+  ).toLocaleDateString("pt-BR");
 }
 
 const nav: { label: Screen; icon: string }[] = [
@@ -421,6 +516,73 @@ export default function Home() {
     setScreen("Visão geral");
   }
 
+  async function handleStockChange(
+    productId: Product["id"],
+    newStock: number
+  ) {
+    const normalizedStock =
+      Math.max(0, Math.floor(newStock));
+
+    try {
+      const {
+        error: stockError,
+      } = await supabase
+        .from("products")
+        .update({
+          stock_quantity: normalizedStock,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", productId);
+
+      if (stockError) {
+        console.error(
+          "Erro ao atualizar estoque:",
+          stockError
+        );
+
+        setToast(
+          "Não foi possível atualizar o estoque."
+        );
+
+        setTimeout(() => {
+          setToast("");
+        }, 2800);
+
+        return;
+      }
+
+      setProducts(currentProducts =>
+        currentProducts.map(product =>
+          product.id === productId
+            ? {
+                ...product,
+                stock: normalizedStock,
+              }
+            : product
+        )
+      );
+
+      setToast("Estoque atualizado!");
+
+      setTimeout(() => {
+        setToast("");
+      }, 1800);
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao atualizar estoque:",
+        error
+      );
+
+      setToast(
+        "Ocorreu um erro ao atualizar o estoque."
+      );
+
+      setTimeout(() => {
+        setToast("");
+      }, 2800);
+    }
+  }
+
   /*
    * Enquanto o Supabase verifica a sessão,
    * não mostra o login nem os painéis.
@@ -470,7 +632,6 @@ export default function Home() {
         products={products.filter(
           product => !product.archived
         )}
-        orders={appOrders}
         quotes={quotes}
         onQuote={(id, status) => {
           setQuotes(current =>
@@ -734,18 +895,7 @@ export default function Home() {
             products={products.filter(
               product => !product.archived
             )}
-            onStock={(id, stock) => {
-              setProducts(current =>
-                current.map(product =>
-                  product.id === id
-                    ? {
-                        ...product,
-                        stock,
-                      }
-                    : product
-                )
-              );
-            }}
+            onStock={handleStockChange}
           />
         )}
 
@@ -1785,10 +1935,14 @@ type ClientSection =
   | "avaliacao"
   | "perfil"
   ;
-function ClientPortal({ userName, products, orders, quotes, onQuote, onOrderRequest, onLogout }: {  userName: string; products: Product[]; orders: any[]; quotes: Quote[]; onQuote: (id: string, status: string) => void; onOrderRequest: (id: string, request: string) => void; onLogout: () => void }) {
+function ClientPortal({ userName, products, quotes, onQuote, onOrderRequest, onLogout }: {  userName: string; products: Product[]; quotes: Quote[]; onQuote: (id: string, status: string) => void; onOrderRequest: (id: string, request: string) => void; onLogout: () => void }) {
   const [section, setSection] =
   useState<ClientSection>("inicio");
+  const [clientOrders, setClientOrders] =
+    useState<ClientOrderRow[]>([]);
 
+  const [ordersLoading, setOrdersLoading] =
+    useState(true);
   const [
     sectionRestored,
     setSectionRestored,
@@ -1803,7 +1957,6 @@ function ClientPortal({ userName, products, orders, quotes, onQuote, onOrderRequ
   const [cartOpen, setCartOpen] = useState(false);
   const [cartToast, setCartToast] = useState("");
   const [requestOrder, setRequestOrder] = useState<string | null>(null);
-  const currentStatus = orders[0]?.status || "Aguardando";
   const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
   useEffect(() => {
     const savedSection =
@@ -1848,6 +2001,161 @@ function ClientPortal({ userName, products, orders, quotes, onQuote, onOrderRequ
     setTimeout(() => setCartToast(""), 2200);
   }
   function changeQuantity(id: Product["id"], delta: number) { setCart(current => current.map(item => item.product.id === id ? { ...item, quantity: item.quantity + delta } : item).filter(item => item.quantity > 0)) }
+  
+  async function loadClientOrders() {
+    setOrdersLoading(true);
+
+    try {
+      const {
+        data,
+        error: ordersError,
+      } = await supabase
+        .from("orders")
+        .select(`
+          id,
+          order_number,
+          status,
+          payment_status,
+          total_amount,
+          delivery_date,
+          delivery_time,
+          request_type,
+          request_status,
+          requested_delivery_date,
+          requested_delivery_time,
+          request_reason,
+          created_at,
+          order_items (
+            id,
+            product_name,
+            unit_price,
+            quantity,
+            customization
+          )
+        `)
+        .order("created_at", {
+          ascending: false,
+        });
+
+      if (ordersError) {
+        console.error(
+          "Erro ao carregar pedidos:",
+          ordersError
+        );
+
+        return;
+      }
+
+      setClientOrders(
+        (data || []) as ClientOrderRow[]
+      );
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao carregar pedidos:",
+        error
+      );
+    } finally {
+      setOrdersLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadClientOrders();
+  }, []);
+
+  async function createOrderFromCart():
+    Promise<OrderCreationResult> {
+    if (cart.length === 0) {
+      return {
+        success: false,
+        message: "O carrinho está vazio.",
+      };
+    }
+
+    try {
+      const items = cart.map(item => ({
+        product_id: String(item.product.id),
+        quantity: item.quantity,
+        customization: {},
+      }));
+
+      const {
+        data,
+        error: orderError,
+      } = await supabase.rpc(
+        "create_client_order",
+        {
+          p_items: items,
+          p_delivery_date: null,
+          p_delivery_time: null,
+          p_notes: null,
+        }
+      );
+
+      if (orderError) {
+        console.error(
+          "Erro ao criar pedido:",
+          orderError
+        );
+
+        return {
+          success: false,
+          message:
+            orderError.message ||
+            "Não foi possível criar o pedido.",
+        };
+      }
+
+      const createdOrder = data as {
+        order_number: number | string;
+      };
+
+      setPurchasedItems(cart);
+      setPaid(true);
+      setCart([]);
+      await loadClientOrders();
+
+      return {
+        success: true,
+        orderNumber: Number(
+          createdOrder.order_number
+        ),
+      };
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao criar pedido:",
+        error
+      );
+
+      return {
+        success: false,
+        message:
+          "Ocorreu um erro ao criar o pedido.",
+      };
+    }
+  }
+
+  const latestOrder =
+  clientOrders[0] || null;
+
+  const latestOrderDescription =
+    latestOrder
+      ? latestOrder.order_items
+          .map(
+            item =>
+              `${item.quantity}× ${item.product_name}`
+          )
+          .join(", ")
+      : "";
+
+  const latestOrderStatus =
+    latestOrder
+      ? orderStatusLabel(latestOrder.status)
+      : "Aguardando";
+
+  const latestOrderPaid =
+    latestOrder?.payment_status === "paid";
+    
   return (
     <main className="client-portal">
       <header className="client-header">
@@ -1876,32 +2184,190 @@ function ClientPortal({ userName, products, orders, quotes, onQuote, onOrderRequ
           <div className="client-welcome"><div><p className="eyebrow">OLÁ, {getFirstName(userName).toUpperCase()}</p><h1>Seus momentos doces,<br />sempre por perto.</h1><span>Acompanhe suas encomendas e fale com a confeitaria.</span></div><button onClick={() => setSection("novo")}>＋ Fazer nova encomenda</button></div>
           <div className="client-grid-main">
             <section className="panel current-order">
-              <div className="client-panel-title"><div><span>🍰</span><div><small>PRÓXIMA ENCOMENDA</small><h2>Bolo Red Velvet</h2></div></div><Status>{currentStatus}</Status></div>
-              <div className="order-detail-row"><div><small>Pedido</small><b>#1048</b></div><div><small>Entrega</small><b>Hoje, 10:30</b></div><div><small>Valor</small><b>R$ 320,00</b></div></div>
-              <OrderTimeline status={currentStatus} paid={paid} />
-              {!paid && <button className="pay-shortcut" onClick={() => setSection("pagamento")}>Realizar pagamento ›</button>}
+              {ordersLoading ? (
+                <div className="empty-cart">
+                  <span>♨</span>
+                  <h3>Carregando seu pedido...</h3>
+                </div>
+              ) : latestOrder ? (
+                <>
+                  <div className="client-panel-title">
+                    <div>
+                      <span>🍰</span>
+
+                      <div>
+                        <small>ÚLTIMO PEDIDO</small>
+                        <h2>
+                          {latestOrderDescription}
+                        </h2>
+                      </div>
+                    </div>
+
+                    <Status>
+                      {latestOrderStatus}
+                    </Status>
+                  </div>
+
+                  <div className="order-detail-row">
+                    <div>
+                      <small>Pedido</small>
+                      <b>#{latestOrder.order_number}</b>
+                    </div>
+
+                    <div>
+                      <small>Entrega</small>
+
+                      <b>
+                        {formatDeliveryDate(
+                          latestOrder.delivery_date
+                        )}
+
+                        {latestOrder.delivery_time &&
+                          `, ${latestOrder.delivery_time.slice(
+                            0,
+                            5
+                          )}`}
+                      </b>
+                    </div>
+
+                    <div>
+                      <small>Valor</small>
+
+                      <b>
+                        {money(
+                          Number(
+                            latestOrder.total_amount
+                          )
+                        )}
+                      </b>
+                    </div>
+                  </div>
+
+                  <OrderTimeline
+                    status={latestOrderStatus}
+                    paid={latestOrderPaid}
+                  />
+                </>
+              ) : (
+                <div className="empty-cart">
+                  <span>🧁</span>
+
+                  <h3>Nenhum pedido realizado</h3>
+
+                  <p>
+                    Escolha produtos no catálogo para
+                    realizar sua primeira encomenda.
+                  </p>
+
+                  <button
+                    onClick={() =>
+                      setSection("catalogo")
+                    }
+                  >
+                    Ver catálogo
+                  </button>
+                </div>
+              )}
             </section>
             <aside className="panel contact-card"><span>♡</span><h2>Precisa de ajuda?</h2><p>Fale diretamente com a confeitaria sobre seu pedido.</p><button>Conversar no WhatsApp</button><small>Atendimento: 8h às 18h</small></aside>
           </div>
-          <div className="client-stats"><article><span>▢</span><div><b>8</b><small>Pedidos realizados</small></div></article><article><span>♡</span><div><b>3 anos</b><small>Com a gente</small></div></article><article><span>☆</span><div><b>240 pontos</b><small>Clube Doce</small></div></article></div>
+          <div className="client-stats"><article><span>▢</span><div><b>{clientOrders.length}</b><small>Pedidos realizados</small></div></article><article><span>♡</span><div><b>3 anos</b><small>Com a gente</small></div></article><article><span>☆</span><div><b>240 pontos</b><small>Clube Doce</small></div></article></div>
         </>}
-        {section === "pedidos" && <>
-          <div className="client-page-title"><p className="eyebrow">HISTÓRICO</p><h1>Meus pedidos</h1><span>Acompanhe, reagende ou solicite o cancelamento.</span></div>
-          <section className="panel client-orders">
-            {orders.slice(0, 4).map((o, i) => (
-              <article key={o.id}>
-                <div className="product-mini">{["🍰", "🎂", "🥧", "🍫"][i]}</div>
-                <div>
-                  <small>{o.id} • {i === 0 ? "23 jul 2026" : "12 jun 2026"}</small>
-                  <h3>{o.item}</h3>
-                  <p>{o.request || (i === 0 ? "Entrega às 10:30" : "Pedido concluído")}</p>
-                  {i === 0 && !o.request && <div className="order-request-actions"><button onClick={() => setRequestOrder(o.id)}>Reagendar</button><button onClick={() => onOrderRequest(o.id, "Cancelamento solicitado")}>Solicitar cancelamento</button></div>}
+        {section === "pedidos" && (
+          <>
+            <div className="client-page-title">
+              <p className="eyebrow">HISTÓRICO</p>
+              <h1>Meus pedidos</h1>
+
+              <span>
+                Acompanhe suas encomendas realizadas.
+              </span>
+            </div>
+
+            <section className="panel client-orders">
+              {ordersLoading && (
+                <div className="empty-cart">
+                  <span>♨</span>
+                  <h3>Carregando pedidos...</h3>
                 </div>
-                <div><Status>{o.request ? "Em análise" : i === 0 ? "Em produção" : "Pronto"}</Status><strong>{o.value}</strong></div>
-              </article>
-            ))}
-          </section>
-        </>}
+              )}
+
+              {!ordersLoading &&
+                clientOrders.length === 0 && (
+                  <div className="empty-cart">
+                    <span>🧁</span>
+
+                    <h3>
+                      Você ainda não possui pedidos
+                    </h3>
+
+                    <p>
+                      Adicione produtos ao carrinho para
+                      realizar sua primeira encomenda.
+                    </p>
+                  </div>
+                )}
+
+              {!ordersLoading &&
+                clientOrders.map(order => {
+                  const itemDescription =
+                    order.order_items
+                      .map(
+                        item =>
+                          `${item.quantity}× ${item.product_name}`
+                      )
+                      .join(", ");
+
+                  const deliveryDescription =
+                    `${formatDeliveryDate(
+                      order.delivery_date
+                    )}${
+                      order.delivery_time
+                        ? ` às ${order.delivery_time.slice(
+                            0,
+                            5
+                          )}`
+                        : ""
+                    }`;
+
+                  return (
+                    <article key={order.id}>
+                      <div className="product-mini">
+                        🍰
+                      </div>
+
+                      <div>
+                        <small>
+                          #{order.order_number} •{" "}
+                          {formatOrderDate(
+                            order.created_at
+                          )}
+                        </small>
+
+                        <h3>{itemDescription}</h3>
+
+                        <p>{deliveryDescription}</p>
+                      </div>
+
+                      <div>
+                        <Status>
+                          {orderStatusLabel(
+                            order.status
+                          )}
+                        </Status>
+
+                        <strong>
+                          {money(
+                            Number(order.total_amount)
+                          )}
+                        </strong>
+                      </div>
+                    </article>
+                  );
+                })}
+            </section>
+          </>
+        )}
         {section === "orcamentos" && <ClientQuotes quotes={quotes.filter(q => q.client === userName)} onAnswer={onQuote} />}
         {section === "catalogo" && <ClientCatalog products={products.filter(p => p.active)} onChoose={p => { setSelectedProduct(p); setSection("novo") }} onAdd={addToCart} />}
         {section === "novo" && <>
@@ -1921,7 +2387,7 @@ function ClientPortal({ userName, products, orders, quotes, onQuote, onOrderRequ
             {sent && <span className="form-success">✓ Solicitação enviada! Entraremos em contato em breve.</span>}
           </form>
         </>}
-        {section === "pagamento" && <Payment paid={paid} cart={paid ? purchasedItems : cart} onPay={() => { setPurchasedItems(cart); setPaid(true); setCart([]) }} />}
+        {section === "pagamento" && <Payment  paid={paid}  cart={paid ? purchasedItems : cart}  onPay={createOrderFromCart}/>}
         {section === "avaliacao" && <Review reviewed={reviewed} stars={stars} setStars={setStars} onSubmit={() => setReviewed(true)} />}
         {section === "perfil" && <>
           <div className="client-page-title"><p className="eyebrow">MINHA CONTA</p><h1>Dados pessoais</h1></div>
@@ -1999,8 +2465,38 @@ function MiniCart({ items, onClose, onQuantity, onCheckout, onCatalog }: { items
   );
 }
 
-function Payment({ paid, cart, onPay }: { paid: boolean; cart: CartItem[]; onPay: () => void }) {
+function Payment({  paid,  cart,  onPay,}: {  paid: boolean;  cart: CartItem[];  onPay: () => Promise<OrderCreationResult>;}) {
   const [method, setMethod] = useState("pix");
+
+  const [processing, setProcessing] =
+  useState(false);
+
+  const [paymentError, setPaymentError] =
+    useState("");
+
+  const [
+    confirmedOrderNumber,
+    setConfirmedOrderNumber,
+  ] = useState<number | null>(null);
+
+  async function confirmOrder() {
+    setPaymentError("");
+    setProcessing(true);
+
+    const result = await onPay();
+
+    setProcessing(false);
+
+    if (!result.success) {
+      setPaymentError(result.message);
+      return;
+    }
+
+    setConfirmedOrderNumber(
+      result.orderNumber
+    );
+  }
+
   const checkoutItems = cart;
   if (!paid && checkoutItems.length === 0) {
     return (
@@ -2017,7 +2513,38 @@ function Payment({ paid, cart, onPay }: { paid: boolean; cart: CartItem[]; onPay
     );
   }
   const total = checkoutItems.reduce((sum, item) => sum + priceNumber(item.product.price) * item.quantity, 0);
-  if (paid) return <div className="success-state"><span>✓</span><h1>Pagamento confirmado!</h1><p>Seu pedido com {checkoutItems.reduce((sum, item) => sum + item.quantity, 0)} {checkoutItems.length === 1 ? "item" : "itens"} foi recebido. A confeitaria já pode iniciar a produção.</p><Status>Confirmado</Status></div>;
+  if (paid) {
+    return (
+      <div className="success-state">
+        <span>✓</span>
+
+        <h1>Pagamento confirmado!</h1>
+
+        {confirmedOrderNumber && (
+          <strong>
+            Pedido #{confirmedOrderNumber}
+          </strong>
+        )}
+
+        <p>
+          Seu pedido com{" "}
+          {checkoutItems.reduce(
+            (sum, item) =>
+              sum + item.quantity,
+            0
+          )}{" "}
+          {checkoutItems.length === 1
+            ? "item"
+            : "itens"}{" "}
+          foi recebido. A confeitaria já pode
+          iniciar a produção.
+        </p>
+
+        <Status>Confirmado</Status>
+      </div>
+    );
+  }
+  
   return (
     <>
       <div className="client-page-title"><p className="eyebrow">PAGAMENTO</p><h1>Finalize sua encomenda</h1><span>Revise todos os itens e escolha a forma de pagamento.</span></div>
@@ -2033,7 +2560,12 @@ function Payment({ paid, cart, onPay }: { paid: boolean; cart: CartItem[]; onPay
           ) : (
             <div className="form-grid card-fields"><label className="wide">Número do cartão<input placeholder="0000 0000 0000 0000" /></label><label>Validade<input placeholder="MM/AA" /></label><label>CVV<input placeholder="123" /></label><label className="wide">Nome no cartão<input placeholder="Como está no cartão" /></label></div>
           )}
-          <button className="confirm-payment" onClick={onPay}>Confirmar pagamento de {money(total)}</button>
+          <button  className="confirm-payment"  disabled={processing}  onClick={confirmOrder}>  {processing    ? "Processando pedido..."    : `Confirmar pagamento de ${money(total)}`}</button>
+          {paymentError && (
+            <p className="form-error">
+              {paymentError}
+            </p>
+          )}
           <small className="secure-note">⌑ Ambiente seguro • Pagamento demonstrativo</small>
         </section>
         <aside className="panel order-summary">
@@ -2112,7 +2644,7 @@ function ClientQuotes({ quotes, onAnswer }: { quotes: Quote[]; onAnswer: (id: st
   );
 }
 
-function Inventory({ products, onStock }: { products: Product[]; onStock: ( id: Product["id"], stock: number ) => void }) {
+function Inventory({  products,  onStock,}: {  products: Product[];  onStock: (    id: Product["id"],    stock: number  ) => Promise<void>;}) {
   const low = products.filter(p => p.stock <= p.lowStock);
   return (
     <div className="content">
@@ -2524,6 +3056,307 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
     }
   }
 
+  async function duplicateProduct(
+    product: Product
+  ) {
+    setUpdatingProductId(product.id);
+
+    let copiedImagePath = "";
+    let copiedImageUrl: string | null = null;
+
+    try {
+      /*
+      * Cria uma cópia independente da imagem.
+      */
+      if (product.image) {
+        const originalImagePath =
+          getProductImagePath(product.image);
+
+        if (originalImagePath) {
+          const extension =
+            originalImagePath
+              .split(".")
+              .pop()
+              ?.toLowerCase() || "jpg";
+
+          copiedImagePath =
+            `products/${crypto.randomUUID()}.${extension}`;
+
+          const {
+            error: copyError,
+          } = await supabase.storage
+            .from("product-images")
+            .copy(
+              originalImagePath,
+              copiedImagePath
+            );
+
+          if (copyError) {
+            console.error(
+              "Erro ao copiar imagem:",
+              copyError
+            );
+
+            onToast(
+              "Não foi possível copiar a imagem."
+            );
+
+            return;
+          }
+
+          const {
+            data: publicImageData,
+          } = supabase.storage
+            .from("product-images")
+            .getPublicUrl(copiedImagePath);
+
+          copiedImageUrl =
+            publicImageData.publicUrl;
+        }
+      }
+
+      const {
+        data: duplicatedRow,
+        error: duplicateError,
+      } = await supabase
+        .from("products")
+        .insert({
+          name: `${product.name} — cópia`,
+          category: product.category,
+          price: databasePrice(product.price),
+          description: product.description,
+          image_url: copiedImageUrl,
+          preparation_time: product.preparation,
+          minimum_order: product.minimum,
+          stock_quantity: product.stock,
+          low_stock_limit: product.lowStock,
+          is_active: false,
+          is_archived: false,
+          is_featured: false,
+          featured_order: null,
+          is_customizable:
+            product.customizable,
+        })
+        .select(`
+          id,
+          name,
+          category,
+          price,
+          description,
+          image_url,
+          preparation_time,
+          minimum_order,
+          stock_quantity,
+          low_stock_limit,
+          is_active,
+          is_archived,
+          is_featured,
+          featured_order,
+          is_customizable
+        `)
+        .single();
+
+      if (duplicateError || !duplicatedRow) {
+        console.error(
+          "Erro ao duplicar produto:",
+          duplicateError
+        );
+
+        if (copiedImagePath) {
+          await supabase.storage
+            .from("product-images")
+            .remove([copiedImagePath]);
+        }
+
+        onToast(
+          "Não foi possível duplicar o produto."
+        );
+
+        return;
+      }
+
+      /*
+      * Duplica as opções de personalização.
+      */
+      if (product.options.length > 0) {
+        const {
+          error: optionsError,
+        } = await supabase
+          .from("product_options")
+          .insert(
+            product.options.map(optionName => ({
+              product_id: duplicatedRow.id,
+              option_name: optionName,
+              option_value: "A combinar",
+              additional_price: 0,
+              is_active: true,
+            }))
+          );
+
+        if (optionsError) {
+          console.error(
+            "Erro ao duplicar opções:",
+            optionsError
+          );
+
+          await supabase
+            .from("products")
+            .delete()
+            .eq("id", duplicatedRow.id);
+
+          if (copiedImagePath) {
+            await supabase.storage
+              .from("product-images")
+              .remove([copiedImagePath]);
+          }
+
+          onToast(
+            "Não foi possível duplicar as personalizações."
+          );
+
+          return;
+        }
+      }
+
+      const duplicatedProduct: Product = {
+        ...mapProduct(
+          duplicatedRow as ProductRow
+        ),
+        options: [...product.options],
+      };
+
+      onChange([
+        duplicatedProduct,
+        ...products,
+      ]);
+
+      onToast(
+        "Produto duplicado como oculto!"
+      );
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao duplicar produto:",
+        error
+      );
+
+      if (copiedImagePath) {
+        await supabase.storage
+          .from("product-images")
+          .remove([copiedImagePath]);
+      }
+
+      onToast(
+        "Ocorreu um erro ao duplicar o produto."
+      );
+    } finally {
+      setUpdatingProductId(null);
+    }
+  }
+
+  async function moveFeaturedProduct(
+    product: Product,
+    direction: -1 | 1
+  ) {
+    const featuredProducts = products
+      .filter(
+        currentProduct =>
+          currentProduct.featured &&
+          !currentProduct.archived
+      )
+      .sort(
+        (first, second) =>
+          first.featuredOrder -
+          second.featuredOrder
+      );
+
+    const currentIndex =
+      featuredProducts.findIndex(
+        currentProduct =>
+          currentProduct.id === product.id
+      );
+
+    const targetIndex =
+      currentIndex + direction;
+
+    if (
+      currentIndex === -1 ||
+      targetIndex < 0 ||
+      targetIndex >= featuredProducts.length
+    ) {
+      return;
+    }
+
+    const targetProduct =
+      featuredProducts[targetIndex];
+
+    setUpdatingProductId(product.id);
+
+    try {
+      const {
+        error: moveError,
+      } = await supabase.rpc(
+        "move_featured_product",
+        {
+          p_product_id: product.id,
+          p_direction: direction,
+        }
+      );
+
+      if (moveError) {
+        console.error(
+          "Erro ao reorganizar destaques:",
+          moveError
+        );
+
+        onToast(
+          "Não foi possível reorganizar os destaques."
+        );
+
+        return;
+      }
+
+      onChange(
+        products.map(currentProduct => {
+          if (currentProduct.id === product.id) {
+            return {
+              ...currentProduct,
+              featuredOrder:
+                targetProduct.featuredOrder,
+            };
+          }
+
+          if (
+            currentProduct.id ===
+            targetProduct.id
+          ) {
+            return {
+              ...currentProduct,
+              featuredOrder:
+                product.featuredOrder,
+            };
+          }
+
+          return currentProduct;
+        })
+      );
+
+      onToast(
+        "Ordem dos destaques atualizada!"
+      );
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao reorganizar:",
+        error
+      );
+
+      onToast(
+        "Ocorreu um erro ao reorganizar os destaques."
+      );
+    } finally {
+      setUpdatingProductId(null);
+    }
+  }
+
   async function updateExistingProduct(
     data: FormData,
     price: number
@@ -2626,8 +3459,10 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
           is_archived: editing.archived,
           is_featured: isFeatured,
           featured_order: isFeatured
-            ? editing.featuredOrder ||
-              products.length
+            ? editing.featured &&
+              editing.featuredOrder > 0
+              ? editing.featuredOrder
+              : getNextFeaturedOrder(products)
             : null,
           is_customizable:
             data.get("customizable") === "on",
@@ -2903,7 +3738,7 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
           is_archived: false,
           is_featured: isFeatured,
           featured_order: isFeatured
-            ? products.length + 1
+            ? getNextFeaturedOrder(products)
             : null,
           is_customizable:
             data.get("customizable") === "on",
@@ -3016,6 +3851,17 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
     }
   }
   const visible = products.filter(p => !p.archived);
+  const orderedFeaturedProducts = products
+    .filter(
+      product =>
+        product.featured &&
+        !product.archived
+    )
+    .sort(
+      (first, second) =>
+        first.featuredOrder -
+        second.featuredOrder
+    );
   return (
     <div className="content">
       <div className="page-actions">
@@ -3034,11 +3880,45 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
               <div className="product-bottom"><strong>{p.price}</strong><button  className={    p.active ? "published" : "draft"  }  disabled={updatingProductId === p.id}  onClick={() =>    toggleProductVisibility(p)  }>  {updatingProductId === p.id    ? "Atualizando..."    : p.active      ? "Publicado"      : "Oculto"}</button></div>
               <div className="product-admin-actions">
                 <button onClick={() => startEdit(p)}>Editar</button>
-                <button onClick={() => { onChange([{ ...p, id: Date.now(), name: `${p.name} — cópia`, active: false, featured: false }, ...products]); onToast("Produto duplicado!") }}>Duplicar</button>
+                <button  disabled={updatingProductId === p.id}  onClick={() => duplicateProduct(p)}>  {updatingProductId === p.id    ? "Duplicando..."    : "Duplicar"}</button>
                 <button  disabled={updatingProductId === p.id}  onClick={() =>    setProductArchived(p, true)  }>  {updatingProductId === p.id    ? "Arquivando..."    : "Arquivar"}</button>
                 <button  className="danger"  disabled={updatingProductId === p.id}  onClick={() => deleteProduct(p)}>  {updatingProductId === p.id    ? "Excluindo..."    : "Excluir"}</button>
               </div>
-              {p.featured && <div className="feature-order"><span>Ordem do destaque</span><button onClick={() => update(p.id, { featuredOrder: Math.max(1, p.featuredOrder - 1) })}>↑</button><button onClick={() => update(p.id, { featuredOrder: p.featuredOrder + 1 })}>↓</button></div>}
+              {p.featured && (
+                <div className="feature-order">
+                  <span>
+                    Ordem do destaque
+                  </span>
+
+                  <button
+                    disabled={
+                      updatingProductId !== null ||
+                      orderedFeaturedProducts[0]?.id === p.id
+                    }
+                    onClick={() =>
+                      moveFeaturedProduct(p, -1)
+                    }
+                    aria-label={`Subir ${p.name}`}
+                  >
+                    ↑
+                  </button>
+
+                  <button
+                    disabled={
+                      updatingProductId !== null ||
+                      orderedFeaturedProducts[
+                        orderedFeaturedProducts.length - 1
+                      ]?.id === p.id
+                    }
+                    onClick={() =>
+                      moveFeaturedProduct(p, 1)
+                    }
+                    aria-label={`Descer ${p.name}`}
+                  >
+                    ↓
+                  </button>
+                </div>
+              )}
             </div>
           </article>
         ))}
