@@ -2286,6 +2286,10 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
     useState<File | null>(null);
 
   const [saving, setSaving] = useState(false);
+  const [
+    updatingProductId,
+    setUpdatingProductId,
+  ] = useState<Product["id"] | null>(null);
   function startEdit(product?: Product) {
     setEditing(product || null);
     setImage(product?.image || "");
@@ -2313,6 +2317,213 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
     reader.readAsDataURL(file);
   }
   function update( id: Product["id"], patch: Partial<Product>) { onChange(products.map(p => p.id === id ? { ...p, ...patch } : p)) }
+  async function toggleProductVisibility(
+    product: Product
+  ) {
+    const newActiveStatus = !product.active;
+
+    setUpdatingProductId(product.id);
+
+    try {
+      const {
+        error: updateError,
+      } = await supabase
+        .from("products")
+        .update({
+          is_active: newActiveStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", product.id);
+
+      if (updateError) {
+        console.error(
+          "Erro ao alterar publicação:",
+          updateError
+        );
+
+        onToast(
+          "Não foi possível alterar a publicação."
+        );
+
+        return;
+      }
+
+      onChange(
+        products.map(currentProduct =>
+          currentProduct.id === product.id
+            ? {
+                ...currentProduct,
+                active: newActiveStatus,
+              }
+            : currentProduct
+        )
+      );
+
+      onToast(
+        newActiveStatus
+          ? "Produto publicado com sucesso!"
+          : "Produto ocultado do catálogo!"
+      );
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao alterar publicação:",
+        error
+      );
+
+      onToast(
+        "Ocorreu um erro ao alterar a publicação."
+      );
+    } finally {
+      setUpdatingProductId(null);
+    }
+  }
+
+  async function setProductArchived(
+    product: Product,
+    archived: boolean
+  ) {
+    setUpdatingProductId(product.id);
+
+    const newActiveStatus = archived
+      ? false
+      : product.active;
+
+    try {
+      const {
+        error: updateError,
+      } = await supabase
+        .from("products")
+        .update({
+          is_archived: archived,
+          is_active: newActiveStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", product.id);
+
+      if (updateError) {
+        console.error(
+          "Erro ao alterar arquivamento:",
+          updateError
+        );
+
+        onToast(
+          "Não foi possível alterar o arquivamento."
+        );
+
+        return;
+      }
+
+      onChange(
+        products.map(currentProduct =>
+          currentProduct.id === product.id
+            ? {
+                ...currentProduct,
+                archived,
+                active: newActiveStatus,
+              }
+            : currentProduct
+        )
+      );
+
+      onToast(
+        archived
+          ? "Produto arquivado com sucesso!"
+          : "Produto restaurado com sucesso!"
+      );
+    } catch (error) {
+      console.error(
+        "Erro inesperado no arquivamento:",
+        error
+      );
+
+      onToast(
+        "Ocorreu um erro ao alterar o arquivamento."
+      );
+    } finally {
+      setUpdatingProductId(null);
+    }
+  }
+
+  async function deleteProduct(
+    product: Product
+  ) {
+    const confirmed = window.confirm(
+      `Excluir definitivamente "${product.name}"?\n\nEssa ação não poderá ser desfeita.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setUpdatingProductId(product.id);
+
+    try {
+      const {
+        error: deleteError,
+      } = await supabase
+        .from("products")
+        .delete()
+        .eq("id", product.id);
+
+      if (deleteError) {
+        console.error(
+          "Erro ao excluir produto:",
+          deleteError
+        );
+
+        onToast(
+          "Não foi possível excluir o produto."
+        );
+
+        return;
+      }
+
+      /*
+      * Depois de excluir o produto,
+      * remove sua imagem do Storage.
+      */
+      if (product.image) {
+        const imagePath =
+          getProductImagePath(product.image);
+
+        if (imagePath) {
+          const {
+            error: imageError,
+          } = await supabase.storage
+            .from("product-images")
+            .remove([imagePath]);
+
+          if (imageError) {
+            console.error(
+              "Produto excluído, mas a imagem não foi removida:",
+              imageError
+            );
+          }
+        }
+      }
+
+      onChange(
+        products.filter(
+          currentProduct =>
+            currentProduct.id !== product.id
+        )
+      );
+
+      onToast("Produto excluído definitivamente!");
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao excluir produto:",
+        error
+      );
+
+      onToast(
+        "Ocorreu um erro ao excluir o produto."
+      );
+    } finally {
+      setUpdatingProductId(null);
+    }
+  }
+
   async function updateExistingProduct(
     data: FormData,
     price: number
@@ -2820,12 +3031,12 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
               <h3>{p.name}</h3>
               <p>{p.description}</p>
               <div className="product-meta"><span>◷ {p.preparation}</span><span>{p.stock} em estoque</span>{p.customizable && <span>Personalizável</span>}</div>
-              <div className="product-bottom"><strong>{p.price}</strong><button className={p.active ? "published" : "draft"} onClick={() => update(p.id, { active: !p.active })}>{p.active ? "Publicado" : "Oculto"}</button></div>
+              <div className="product-bottom"><strong>{p.price}</strong><button  className={    p.active ? "published" : "draft"  }  disabled={updatingProductId === p.id}  onClick={() =>    toggleProductVisibility(p)  }>  {updatingProductId === p.id    ? "Atualizando..."    : p.active      ? "Publicado"      : "Oculto"}</button></div>
               <div className="product-admin-actions">
                 <button onClick={() => startEdit(p)}>Editar</button>
                 <button onClick={() => { onChange([{ ...p, id: Date.now(), name: `${p.name} — cópia`, active: false, featured: false }, ...products]); onToast("Produto duplicado!") }}>Duplicar</button>
-                <button onClick={() => update(p.id, { archived: true, active: false })}>Arquivar</button>
-                <button className="danger" onClick={() => confirm(`Excluir ${p.name}?`) && onChange(products.filter(x => x.id !== p.id))}>Excluir</button>
+                <button  disabled={updatingProductId === p.id}  onClick={() =>    setProductArchived(p, true)  }>  {updatingProductId === p.id    ? "Arquivando..."    : "Arquivar"}</button>
+                <button  className="danger"  disabled={updatingProductId === p.id}  onClick={() => deleteProduct(p)}>  {updatingProductId === p.id    ? "Excluindo..."    : "Excluir"}</button>
               </div>
               {p.featured && <div className="feature-order"><span>Ordem do destaque</span><button onClick={() => update(p.id, { featuredOrder: Math.max(1, p.featuredOrder - 1) })}>↑</button><button onClick={() => update(p.id, { featuredOrder: p.featuredOrder + 1 })}>↓</button></div>}
             </div>
@@ -2835,7 +3046,7 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
       {products.some(p => p.archived) && (
         <section className="archived-products panel">
           <h3>Produtos arquivados</h3>
-          {products.filter(p => p.archived).map(p => <div key={p.id}><span>{p.name}</span><button onClick={() => update(p.id, { archived: false })}>Restaurar</button></div>)}
+          {products.filter(p => p.archived).map(p => <div key={p.id}><span>{p.name}</span><button  disabled={updatingProductId === p.id}  onClick={() =>    setProductArchived(p, false)  }>  {updatingProductId === p.id    ? "Restaurando..."    : "Restaurar"}</button></div>)}
         </section>
       )}
       {open && (
