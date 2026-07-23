@@ -5,12 +5,104 @@ import { supabase } from "./lib/supabase";
 
 type Screen = "Visão geral" | "Pedidos" | "Orçamentos" | "Produção" | "Cardápio" | "Estoque" | "Clientes" | "Financeiro" | "Relatórios" | "Configurações";
 type Role = "admin" | "client";
-type Product = { id: number; name: string; category: string; price: string; description: string; image: string; active: boolean; archived: boolean; preparation: string; minimum: string; featured: boolean; featuredOrder: number; stock: number; lowStock: number; customizable: boolean; options: string[] };
+type UserProfile = {
+  full_name: string;
+  role: Role;
+};
+type Product = {
+  id: string | number;
+  name: string;
+  category: string;
+  price: string;
+  description: string;
+  image: string;
+  active: boolean;
+  archived: boolean;
+  preparation: string;
+  minimum: string;
+  featured: boolean;
+  featuredOrder: number;
+  stock: number;
+  lowStock: number;
+  customizable: boolean;
+  options: string[];
+};
+type ProductRow = {
+  id: string;
+  name: string;
+  category: string;
+  price: number | string;
+  description: string | null;
+  image_url: string | null;
+  preparation_time: string | null;
+  minimum_order: string | null;
+  stock_quantity: number;
+  low_stock_limit: number;
+  is_active: boolean;
+  is_archived: boolean;
+  is_featured: boolean;
+  featured_order: number | null;
+  is_customizable: boolean;
+
+  product_options?: {
+    option_name: string;
+  }[];
+};
+
 type CartItem = { product: Product; quantity: number };
 type Quote = { id: string; client: string; item: string; details: string; value: string; status: string; date: string };
 
 function priceNumber(price: string) { return Number(price.replace(/[^\d,]/g, "").replace(",", ".")) || 0 }
+function databasePrice(value: string) {
+  const sanitized = value
+    .replace(/[^\d,.]/g, "")
+    .trim();
+
+  const normalized = sanitized.includes(",")
+    ? sanitized.replace(/\./g, "").replace(",", ".")
+    : sanitized;
+
+  return Number(normalized);
+}
 function money(value: number) { return value.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }) }
+function getFirstName(fullName: string) {
+  return fullName.trim().split(" ")[0] || "Usuário";
+}
+
+function getInitials(fullName: string) {
+  return fullName
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map(name => name[0]?.toUpperCase())
+    .join("");
+}
+function mapProduct(row: ProductRow): Product {
+  return {
+    id: row.id,
+    name: row.name,
+    category: row.category,
+    price: money(Number(row.price)),
+    description: row.description || "",
+    image: row.image_url || "",
+    active: row.is_active,
+    archived: row.is_archived,
+    preparation: row.preparation_time || "",
+    minimum: row.minimum_order || "",
+    featured: row.is_featured,
+    featuredOrder: row.featured_order || 0,
+    stock: row.stock_quantity,
+    lowStock: row.low_stock_limit,
+    customizable: row.is_customizable,
+    options: Array.from(
+      new Set(
+        (row.product_options || []).map(
+          option => option.option_name
+        )
+      )
+    ),
+  };
+}
 
 const nav: { label: Screen; icon: string }[] = [
   { label: "Visão geral", icon: "⌂" },
@@ -31,13 +123,6 @@ const orders = [
   { id: "#1050", client: "Beatriz Lima", initials: "BL", item: "Torta de Limão", time: "14:30", date: "Hoje", value: "R$ 148,00", status: "Aguardando" },
   { id: "#1051", client: "Mariana Costa", initials: "MC", item: "50 Brigadeiros gourmet", time: "16:00", date: "Hoje", value: "R$ 225,00", status: "Confirmado" },
   { id: "#1052", client: "Paulo Nunes", initials: "PN", item: "Bolo de casamento", time: "09:00", date: "Amanhã", value: "R$ 890,00", status: "Pendente" },
-];
-
-const initialProducts: Product[] = [
-  { id: 1, name: "Bolo Red Velvet", category: "Bolos", price: "R$ 160,00", description: "Massa aveludada de cacau, recheio cremoso e cobertura de cream cheese.", image: "", active: true, archived: false, preparation: "3 dias", minimum: "1 unidade", featured: true, featuredOrder: 1, stock: 8, lowStock: 3, customizable: true, options: ["Tamanho", "Recheio", "Decoração"] },
-  { id: 2, name: "Torta de Limão", category: "Tortas", price: "R$ 148,00", description: "Base crocante, creme cítrico de limão e merengue levemente dourado.", image: "", active: true, archived: false, preparation: "2 dias", minimum: "1 unidade", featured: false, featuredOrder: 3, stock: 2, lowStock: 3, customizable: true, options: ["Tamanho", "Mensagem"] },
-  { id: 3, name: "Brigadeiro gourmet", category: "Doces", price: "R$ 4,50", description: "Brigadeiro artesanal com chocolate belga e granulado premium.", image: "", active: true, archived: false, preparation: "2 dias", minimum: "25 unidades", featured: true, featuredOrder: 2, stock: 120, lowStock: 40, customizable: true, options: ["Sabor", "Embalagem"] },
-  { id: 4, name: "Kit Festa 30 pessoas", category: "Kits", price: "R$ 485,00", description: "Bolo decorado, 150 doces e 300 salgados para uma comemoração completa.", image: "", active: true, archived: false, preparation: "5 dias", minimum: "1 kit", featured: false, featuredOrder: 4, stock: 5, lowStock: 2, customizable: true, options: ["Tema", "Sabores", "Cores"] },
 ];
 
 const initialQuotes: Quote[] = [
@@ -61,6 +146,9 @@ export default function Home() {
   const [role, setRole] =
     useState<Role | null>(null);
 
+  const [profile, setProfile] =
+    useState<UserProfile | null>(null);
+
   const [authLoading, setAuthLoading] =
     useState(true);
 
@@ -75,7 +163,7 @@ export default function Home() {
     useState(false);
 
   const [products, setProducts] =
-    useState<Product[]>(initialProducts);
+    useState<Product[]>([]);
 
   const [appOrders, setAppOrders] =
     useState(orders);
@@ -120,11 +208,13 @@ export default function Home() {
           );
 
           setRole(null);
+          setProfile(null);
           return;
         }
 
         if (!session?.user) {
           setRole(null);
+          setProfile(null);
           return;
         }
 
@@ -133,7 +223,7 @@ export default function Home() {
           error: profileError,
         } = await supabase
           .from("profiles")
-          .select("role")
+          .select("full_name, role")
           .eq("id", session.user.id)
           .single();
 
@@ -149,6 +239,7 @@ export default function Home() {
 
           await supabase.auth.signOut();
           setRole(null);
+          setProfile(null);
           return;
         }
 
@@ -158,10 +249,12 @@ export default function Home() {
         ) {
           await supabase.auth.signOut();
           setRole(null);
+          setProfile(null);
           return;
         }
 
         setRole(profile.role as Role);
+        setProfile(profile as UserProfile);
       } catch (connectionError) {
         console.error(
           "Erro ao restaurar a sessão:",
@@ -169,6 +262,7 @@ export default function Home() {
         );
 
         setRole(null);
+        setProfile(null);
       } finally {
         if (componentActive) {
           setAuthLoading(false);
@@ -182,6 +276,75 @@ export default function Home() {
       componentActive = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (authLoading || !role) {
+      return;
+    }
+
+    let componentActive = true;
+
+    async function loadProducts() {
+      const { data, error } = await supabase
+        .from("products")
+        .select(`
+          id,
+          name,
+          category,
+          price,
+          description,
+          image_url,
+          preparation_time,
+          minimum_order,
+          stock_quantity,
+          low_stock_limit,
+          is_active,
+          is_archived,
+          is_featured,
+          featured_order,
+          is_customizable,
+          product_options (
+            option_name
+          )
+        `)
+        .order("created_at", {
+          ascending: false,
+        });
+
+      if (!componentActive) {
+        return;
+      }
+
+      if (error) {
+        console.error(
+          "Erro ao carregar produtos:",
+          error
+        );
+
+        setToast(
+          "Não foi possível carregar os produtos."
+        );
+
+        setTimeout(() => {
+          setToast("");
+        }, 2800);
+
+        return;
+      }
+
+      const productRows = (data || []) as ProductRow[];
+
+      setProducts(
+        productRows.map(mapProduct)
+      );
+    }
+
+    loadProducts();
+
+    return () => {
+      componentActive = false;
+    };
+  }, [authLoading, role]);
 
   const filteredOrders = useMemo(
     () =>
@@ -207,6 +370,11 @@ export default function Home() {
   }
 
   async function handleLogout() {
+  
+    sessionStorage.removeItem(
+      "doce-gestao-client-section"
+    );
+    
     const { error: logoutError } =
       await supabase.auth.signOut();
 
@@ -228,6 +396,7 @@ export default function Home() {
     }
 
     setRole(null);
+    setProfile(null);
     setScreen("Visão geral");
   }
 
@@ -260,7 +429,14 @@ export default function Home() {
    * Sem usuário autenticado, mostra o login.
    */
   if (!role) {
-    return <Login onLogin={setRole} />;
+    return (
+      <Login
+        onLogin={userProfile => {
+          setProfile(userProfile);
+          setRole(userProfile.role);
+        }}
+      />
+    );
   }
 
   /*
@@ -269,6 +445,7 @@ export default function Home() {
   if (role === "client") {
     return (
       <ClientPortal
+        userName={profile?.full_name || "Cliente"}
         products={products.filter(
           product => !product.archived
         )}
@@ -395,7 +572,9 @@ export default function Home() {
 
             <h1>
               {screen === "Visão geral"
-                ? "Bom dia, Marina"
+                ? `Bom dia, ${getFirstName(
+                  profile?.full_name || "Administrador"
+                )}`
                 : screen}
             </h1>
 
@@ -430,14 +609,20 @@ export default function Home() {
               <i />
             </button>
 
-            <div className="avatar">MB</div>
+            <div className="avatar">
+              {getInitials(
+                profile?.full_name || "Administrador"
+              )}
+            </div>
 
             <button
               className="user user-button"
               onClick={handleLogout}
               title="Sair da conta"
             >
-              <strong>Marina Borges</strong>
+              <strong>
+                {profile?.full_name || "Administrador"}
+              </strong>
 
               <small>
                 Administradora • Sair
@@ -706,7 +891,7 @@ export default function Home() {
 function Login({
   onLogin,
 }: {
-  onLogin: (role: Role) => void;
+  onLogin: (profile: UserProfile) => void;
 }) {
   const [role, setRole] = useState<Role>("admin");
   const [showPassword, setShowPassword] =
@@ -787,7 +972,7 @@ function Login({
         error: profileError,
       } = await supabase
         .from("profiles")
-        .select("role")
+        .select("full_name, role")
         .eq("id", authData.user.id)
         .single();
 
@@ -831,7 +1016,11 @@ function Login({
         return;
       }
 
-      onLogin(profileRole);
+      onLogin({
+        full_name: profile.full_name,
+        role: profileRole,
+      });
+
     } catch (connectionError) {
       console.error(
         "Erro de conexão no login:",
@@ -1565,8 +1754,24 @@ function Signup({ onBack }: { onBack: () => void }) {
   );
 }
 
-function ClientPortal({ products, orders, quotes, onQuote, onOrderRequest, onLogout }: { products: Product[]; orders: any[]; quotes: Quote[]; onQuote: (id: string, status: string) => void; onOrderRequest: (id: string, request: string) => void; onLogout: () => void }) {
-  const [section, setSection] = useState<"inicio" | "catalogo" | "pedidos" | "orcamentos" | "novo" | "pagamento" | "avaliacao" | "perfil">("inicio");
+type ClientSection =
+  | "inicio"
+  | "catalogo"
+  | "pedidos"
+  | "orcamentos"
+  | "novo"
+  | "pagamento"
+  | "avaliacao"
+  | "perfil"
+  ;
+function ClientPortal({ userName, products, orders, quotes, onQuote, onOrderRequest, onLogout }: {  userName: string; products: Product[]; orders: any[]; quotes: Quote[]; onQuote: (id: string, status: string) => void; onOrderRequest: (id: string, request: string) => void; onLogout: () => void }) {
+  const [section, setSection] =
+  useState<ClientSection>("inicio");
+
+  const [
+    sectionRestored,
+    setSectionRestored,
+  ] = useState(false);
   const [sent, setSent] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [paid, setPaid] = useState(false);
@@ -1579,12 +1784,49 @@ function ClientPortal({ products, orders, quotes, onQuote, onOrderRequest, onLog
   const [requestOrder, setRequestOrder] = useState<string | null>(null);
   const currentStatus = orders[0]?.status || "Aguardando";
   const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
+  useEffect(() => {
+    const savedSection =
+      sessionStorage.getItem(
+        "doce-gestao-client-section"
+      ) as ClientSection | null;
+
+    const validSections: ClientSection[] = [
+      "inicio",
+      "catalogo",
+      "pedidos",
+      "orcamentos",
+      "novo",
+      "pagamento",
+      "avaliacao",
+      "perfil",
+    ];
+
+    if (
+      savedSection &&
+      validSections.includes(savedSection)
+    ) {
+      setSection(savedSection);
+    }
+
+    setSectionRestored(true);
+  }, []);
+
+  useEffect(() => {
+    if (!sectionRestored) {
+      return;
+    }
+
+    sessionStorage.setItem(
+      "doce-gestao-client-section",
+      section
+    );
+  }, [section, sectionRestored]);
   function addToCart(product: Product) {
     setCart(current => current.some(item => item.product.id === product.id) ? current.map(item => item.product.id === product.id ? { ...item, quantity: item.quantity + 1 } : item) : [...current, { product, quantity: 1 }]);
     setCartToast(`${product.name} adicionado ao carrinho`);
     setTimeout(() => setCartToast(""), 2200);
   }
-  function changeQuantity(id: number, delta: number) { setCart(current => current.map(item => item.product.id === id ? { ...item, quantity: item.quantity + delta } : item).filter(item => item.quantity > 0)) }
+  function changeQuantity(id: Product["id"], delta: number) { setCart(current => current.map(item => item.product.id === id ? { ...item, quantity: item.quantity + delta } : item).filter(item => item.quantity > 0)) }
   return (
     <main className="client-portal">
       <header className="client-header">
@@ -1599,14 +1841,18 @@ function ClientPortal({ products, orders, quotes, onQuote, onOrderRequest, onLog
         </nav>
         <div className="client-account">
           <button className="cart-trigger" onClick={() => setCartOpen(true)} aria-label={`Abrir carrinho com ${cartCount} itens`}><span>🛒</span><b>{cartCount}</b></button>
-          <span className="initials">AR</span>
-          <button onClick={() => setSection("perfil")}>Ana Ribeiro</button>
+          <span className="initials">
+            {getInitials(userName)}
+          </span>
+          <button onClick={() => setSection("perfil")}>
+            {userName}
+          </button>
           <button onClick={onLogout} className="logout">Sair</button>
         </div>
       </header>
       <section className="client-main">
         {section === "inicio" && <>
-          <div className="client-welcome"><div><p className="eyebrow">OLÁ, ANA</p><h1>Seus momentos doces,<br />sempre por perto.</h1><span>Acompanhe suas encomendas e fale com a confeitaria.</span></div><button onClick={() => setSection("novo")}>＋ Fazer nova encomenda</button></div>
+          <div className="client-welcome"><div><p className="eyebrow">OLÁ, {getFirstName(userName).toUpperCase()}</p><h1>Seus momentos doces,<br />sempre por perto.</h1><span>Acompanhe suas encomendas e fale com a confeitaria.</span></div><button onClick={() => setSection("novo")}>＋ Fazer nova encomenda</button></div>
           <div className="client-grid-main">
             <section className="panel current-order">
               <div className="client-panel-title"><div><span>🍰</span><div><small>PRÓXIMA ENCOMENDA</small><h2>Bolo Red Velvet</h2></div></div><Status>{currentStatus}</Status></div>
@@ -1635,7 +1881,7 @@ function ClientPortal({ products, orders, quotes, onQuote, onOrderRequest, onLog
             ))}
           </section>
         </>}
-        {section === "orcamentos" && <ClientQuotes quotes={quotes.filter(q => q.client === "Ana Ribeiro")} onAnswer={onQuote} />}
+        {section === "orcamentos" && <ClientQuotes quotes={quotes.filter(q => q.client === userName)} onAnswer={onQuote} />}
         {section === "catalogo" && <ClientCatalog products={products.filter(p => p.active)} onChoose={p => { setSelectedProduct(p); setSection("novo") }} onAdd={addToCart} />}
         {section === "novo" && <>
           <div className="client-page-title"><p className="eyebrow">NOVA ENCOMENDA</p><h1>Conte seu desejo doce</h1><span>Personalize os detalhes e solicite seu orçamento.</span></div>
@@ -1658,7 +1904,7 @@ function ClientPortal({ products, orders, quotes, onQuote, onOrderRequest, onLog
         {section === "avaliacao" && <Review reviewed={reviewed} stars={stars} setStars={setStars} onSubmit={() => setReviewed(true)} />}
         {section === "perfil" && <>
           <div className="client-page-title"><p className="eyebrow">MINHA CONTA</p><h1>Dados pessoais</h1></div>
-          <section className="panel settings"><div className="form-grid"><label>Nome<input defaultValue="Ana Ribeiro" /></label><label>Telefone<input defaultValue="(22) 99987-6543" /></label><label>E-mail<input defaultValue="ana.ribeiro@email.com" /></label><label>Data de nascimento<input type="date" defaultValue="1994-05-18" /></label><label className="wide">Endereço<input defaultValue="Rua das Acácias, 85 — Centro" /></label></div><button className="primary">Salvar alterações</button></section>
+          <section className="panel settings"><div className="form-grid"><label>Nome<input defaultValue={userName} /></label><label>Telefone<input defaultValue="(22) 99987-6543" /></label><label>E-mail<input defaultValue="ana.ribeiro@email.com" /></label><label>Data de nascimento<input type="date" defaultValue="1994-05-18" /></label><label className="wide">Endereço<input defaultValue="Rua das Acácias, 85 — Centro" /></label></div><button className="primary">Salvar alterações</button></section>
         </>}
       </section>
       {cartOpen && <MiniCart items={cart} onClose={() => setCartOpen(false)} onQuantity={changeQuantity} onCheckout={() => { setCartOpen(false); setPaid(false); setSection("pagamento") }} onCatalog={() => { setCartOpen(false); setSection("catalogo") }} />}
@@ -1695,7 +1941,7 @@ function OrderTimeline({ status, paid }: { status: string; paid: boolean }) {
   );
 }
 
-function MiniCart({ items, onClose, onQuantity, onCheckout, onCatalog }: { items: CartItem[]; onClose: () => void; onQuantity: (id: number, delta: number) => void; onCheckout: () => void; onCatalog: () => void }) {
+function MiniCart({ items, onClose, onQuantity, onCheckout, onCatalog }: { items: CartItem[]; onClose: () => void; onQuantity: (id: Product["id"],delta: number) => void; onCheckout: () => void; onCatalog: () => void }) {
   const total = items.reduce((sum, item) => sum + priceNumber(item.product.price) * item.quantity, 0);
   return (
     <div className="minicart-backdrop" onMouseDown={e => e.currentTarget === e.target && onClose()}>
@@ -1734,7 +1980,21 @@ function MiniCart({ items, onClose, onQuantity, onCheckout, onCatalog }: { items
 
 function Payment({ paid, cart, onPay }: { paid: boolean; cart: CartItem[]; onPay: () => void }) {
   const [method, setMethod] = useState("pix");
-  const checkoutItems = cart.length ? cart : [{ product: { ...initialProducts[0], price: "R$ 320,00" }, quantity: 1 }];
+  const checkoutItems = cart;
+  if (!paid && checkoutItems.length === 0) {
+    return (
+      <div className="empty-cart">
+        <span>🧁</span>
+
+        <h3>Nenhum produto selecionado</h3>
+
+        <p>
+          Adicione produtos ao carrinho antes de realizar
+          o pagamento.
+        </p>
+      </div>
+    );
+  }
   const total = checkoutItems.reduce((sum, item) => sum + priceNumber(item.product.price) * item.quantity, 0);
   if (paid) return <div className="success-state"><span>✓</span><h1>Pagamento confirmado!</h1><p>Seu pedido com {checkoutItems.reduce((sum, item) => sum + item.quantity, 0)} {checkoutItems.length === 1 ? "item" : "itens"} foi recebido. A confeitaria já pode iniciar a produção.</p><Status>Confirmado</Status></div>;
   return (
@@ -1831,7 +2091,7 @@ function ClientQuotes({ quotes, onAnswer }: { quotes: Quote[]; onAnswer: (id: st
   );
 }
 
-function Inventory({ products, onStock }: { products: Product[]; onStock: (id: number, stock: number) => void }) {
+function Inventory({ products, onStock }: { products: Product[]; onStock: ( id: Product["id"], stock: number ) => void }) {
   const low = products.filter(p => p.stock <= p.lowStock);
   return (
     <div className="content">
@@ -1996,36 +2256,262 @@ function Production() {
 }
 
 function Catalog({ products, onChange, onToast }: { products: Product[]; onChange: (p: Product[]) => void; onToast: (m: string) => void }) {
-  const [editing, setEditing] = useState<Product | null>(null);
+  const [editing, setEditing] =
+    useState<Product | null>(null);
+
   const [open, setOpen] = useState(false);
   const [image, setImage] = useState("");
-  function startEdit(p?: Product) { setEditing(p || null); setImage(p?.image || ""); setOpen(true) }
-  function handleImage(e: React.ChangeEvent<HTMLInputElement>) { const file = e.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => setImage(String(reader.result)); reader.readAsDataURL(file) }
-  function update(id: number, patch: Partial<Product>) { onChange(products.map(p => p.id === id ? { ...p, ...patch } : p)) }
-  function submit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const d = new FormData(e.currentTarget);
-    const product: Product = {
-      id: editing?.id || Date.now(),
-      name: String(d.get("name")),
-      category: String(d.get("category")),
-      price: `R$ ${String(d.get("price")).replace("R$", "").trim().replace(".", ",")}`,
-      description: String(d.get("description")),
-      image,
-      active: d.get("active") === "on",
-      archived: false,
-      preparation: String(d.get("preparation")),
-      minimum: String(d.get("minimum")),
-      featured: d.get("featured") === "on",
-      featuredOrder: editing?.featuredOrder || products.length + 1,
-      stock: Number(d.get("stock")) || 0,
-      lowStock: Number(d.get("lowStock")) || 3,
-      customizable: d.get("customizable") === "on",
-      options: String(d.get("options") || "").split(",").map(v => v.trim()).filter(Boolean)
+  const [imageFile, setImageFile] =
+    useState<File | null>(null);
+
+  const [saving, setSaving] = useState(false);
+  function startEdit(product?: Product) {
+    setEditing(product || null);
+    setImage(product?.image || "");
+    setImageFile(null);
+    setOpen(true);
+  }
+
+  function handleImage(
+    e: React.ChangeEvent<HTMLInputElement>
+  ) {
+    const file = e.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    setImageFile(file);
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      setImage(String(reader.result));
     };
-    onChange(editing ? products.map(p => p.id === editing.id ? product : p) : [product, ...products]);
-    setOpen(false);
-    onToast(editing ? "Produto atualizado!" : "Produto publicado!")
+
+    reader.readAsDataURL(file);
+  }
+  function update( id: Product["id"], patch: Partial<Product>) { onChange(products.map(p => p.id === id ? { ...p, ...patch } : p)) }
+  async function submit(
+    e: React.FormEvent<HTMLFormElement>
+  ) {
+    e.preventDefault();
+
+    if (editing) {
+      onToast(
+        "A edição será conectada na próxima etapa."
+      );
+      return;
+    }
+
+    if (!imageFile) {
+      onToast("Selecione uma foto para o produto.");
+      return;
+    }
+
+    const form = e.currentTarget;
+    const data = new FormData(form);
+
+    const price = databasePrice(
+      String(data.get("price") || "")
+    );
+
+    if (!Number.isFinite(price) || price <= 0) {
+      onToast("Informe um preço válido.");
+      return;
+    }
+
+    setSaving(true);
+
+    let uploadedImagePath = "";
+
+    try {
+      const fileExtension =
+        imageFile.name.split(".").pop()?.toLowerCase() ||
+        "jpg";
+
+      uploadedImagePath =
+        `products/${crypto.randomUUID()}.${fileExtension}`;
+
+      const {
+        error: uploadError,
+      } = await supabase.storage
+        .from("product-images")
+        .upload(uploadedImagePath, imageFile, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: imageFile.type,
+        });
+
+      if (uploadError) {
+        console.error(
+          "Erro ao enviar imagem:",
+          uploadError
+        );
+
+        onToast(
+          "Não foi possível enviar a imagem."
+        );
+
+        return;
+      }
+
+      const {
+        data: publicImageData,
+      } = supabase.storage
+        .from("product-images")
+        .getPublicUrl(uploadedImagePath);
+
+      const options = String(
+        data.get("options") || ""
+      )
+        .split(",")
+        .map(option => option.trim())
+        .filter(Boolean);
+
+      const isFeatured =
+        data.get("featured") === "on";
+
+      const {
+        data: createdProduct,
+        error: productError,
+      } = await supabase
+        .from("products")
+        .insert({
+          name: String(data.get("name") || "").trim(),
+          category: String(
+            data.get("category") || ""
+          ),
+          price,
+          description: String(
+            data.get("description") || ""
+          ).trim(),
+          image_url: publicImageData.publicUrl,
+          preparation_time: String(
+            data.get("preparation") || ""
+          ).trim(),
+          minimum_order: String(
+            data.get("minimum") || ""
+          ).trim(),
+          stock_quantity:
+            Number(data.get("stock")) || 0,
+          low_stock_limit:
+            Number(data.get("lowStock")) || 0,
+          is_active: data.get("active") === "on",
+          is_archived: false,
+          is_featured: isFeatured,
+          featured_order: isFeatured
+            ? products.length + 1
+            : null,
+          is_customizable:
+            data.get("customizable") === "on",
+        })
+        .select(`
+          id,
+          name,
+          category,
+          price,
+          description,
+          image_url,
+          preparation_time,
+          minimum_order,
+          stock_quantity,
+          low_stock_limit,
+          is_active,
+          is_archived,
+          is_featured,
+          featured_order,
+          is_customizable
+        `)
+        .single();
+
+      if (productError || !createdProduct) {
+        console.error(
+          "Erro ao cadastrar produto:",
+          productError
+        );
+
+        await supabase.storage
+          .from("product-images")
+          .remove([uploadedImagePath]);
+
+        onToast(
+          "Não foi possível cadastrar o produto."
+        );
+
+        return;
+      }
+
+      if (options.length > 0) {
+      const {
+        error: optionsError,
+      } = await supabase
+        .from("product_options")
+        .insert(
+          options.map(optionName => ({
+            product_id: createdProduct.id,
+            option_name: optionName,
+            option_value: "A combinar",
+            additional_price: 0,
+            is_active: true,
+          }))
+        );
+
+      if (optionsError) {
+        console.error(
+          "Erro ao cadastrar personalizações:",
+          optionsError
+        );
+
+        await supabase
+          .from("products")
+          .delete()
+          .eq("id", createdProduct.id);
+
+        await supabase.storage
+          .from("product-images")
+          .remove([uploadedImagePath]);
+
+        onToast(
+          "Não foi possível cadastrar as personalizações."
+        );
+
+        return;
+      }
+    }
+
+      const product = {
+        ...mapProduct(
+          createdProduct as ProductRow
+        ),
+        options,
+      };
+
+      onChange([product, ...products]);
+
+      setOpen(false);
+      setImage("");
+      setImageFile(null);
+
+      onToast("Produto publicado com sucesso!");
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao cadastrar produto:",
+        error
+      );
+
+      if (uploadedImagePath) {
+        await supabase.storage
+          .from("product-images")
+          .remove([uploadedImagePath]);
+      }
+
+      onToast(
+        "Ocorreu um erro ao cadastrar o produto."
+      );
+    } finally {
+      setSaving(false);
+    }
   }
   const visible = products.filter(p => !p.archived);
   return (
@@ -2068,7 +2554,7 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
             <div className="product-form-layout">
               <label className="image-upload">
                 {image ? <img src={image} alt="Prévia" /> : <><span>▧</span><b>Adicionar foto</b><small>PNG ou JPG</small></>}
-                <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleImage} />
+                <input required={!editing} type="file" accept="image/png,image/jpeg,image/webp" onChange={handleImage}/>
               </label>
               <div className="form-grid compact-form">
                 <label className="wide">Título<input required name="name" defaultValue={editing?.name} /></label>
@@ -2089,7 +2575,7 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
               <label><input name="featured" type="checkbox" defaultChecked={editing?.featured} /> Destaque</label>
               <label><input name="customizable" type="checkbox" defaultChecked={editing?.customizable ?? true} /> Permitir personalização</label>
             </div>
-            <div className="modal-actions"><button type="button" className="secondary" onClick={() => setOpen(false)}>Cancelar</button><button className="primary">Salvar produto</button></div>
+            <div className="modal-actions"><button type="button" className="secondary" onClick={() => setOpen(false)}>Cancelar</button><button className="primary" disabled={saving} > {saving  ? "Salvando produto..." : "Salvar produto"}</button></div>
           </form>
         </div>
       )}
