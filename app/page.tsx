@@ -175,35 +175,363 @@ export default function Home() {
   );
 }
 
-function Login({ onLogin }: { onLogin: (role: Role) => void }) {
+function Login({
+  onLogin,
+}: {
+  onLogin: (role: Role) => void;
+}) {
   const [role, setRole] = useState<Role>("admin");
-  const [showPassword, setShowPassword] = useState(false);
+  const [showPassword, setShowPassword] =
+    useState(false);
   const [signup, setSignup] = useState(false);
-  if (signup) return <Signup onBack={() => { setSignup(false); setRole("client") }} />;
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleLogin(
+    e: React.FormEvent<HTMLFormElement>
+  ) {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    const form = e.currentTarget;
+    const data = new FormData(form);
+
+    const email = String(data.get("email") || "")
+      .trim()
+      .toLowerCase();
+
+    const password = String(
+      data.get("password") || ""
+    );
+
+    if (!email || !password) {
+      setError("Informe o e-mail e a senha.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const {
+        data: authData,
+        error: authError,
+      } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (authError) {
+        console.error(
+          "Erro de autenticação:",
+          authError
+        );
+
+        const message =
+          authError.message.toLowerCase();
+
+        if (message.includes("email not confirmed")) {
+          setError(
+            "Confirme seu e-mail antes de entrar."
+          );
+          return;
+        }
+
+        if (
+          message.includes("invalid login credentials")
+        ) {
+          setError("E-mail ou senha incorretos.");
+          return;
+        }
+
+        setError(authError.message);
+        return;
+      }
+
+      if (!authData.user) {
+        setError(
+          "Não foi possível identificar o usuário."
+        );
+        return;
+      }
+
+      const {
+        data: profile,
+        error: profileError,
+      } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", authData.user.id)
+        .single();
+
+      if (profileError || !profile) {
+        console.error(
+          "Erro ao carregar perfil:",
+          profileError
+        );
+
+        await supabase.auth.signOut();
+
+        setError(
+          "Não foi possível carregar o perfil da conta."
+        );
+        return;
+      }
+
+      const profileRole = profile.role as Role;
+
+      if (
+        profileRole !== "admin" &&
+        profileRole !== "client"
+      ) {
+        await supabase.auth.signOut();
+
+        setError(
+          "O tipo desta conta não é válido."
+        );
+        return;
+      }
+
+      if (profileRole !== role) {
+        await supabase.auth.signOut();
+
+        setError(
+          profileRole === "client"
+            ? "Conta não encontrada, tente novamente."
+            : "Conta não encontrada, tente novamente."
+        );
+
+        return;
+      }
+
+      onLogin(profileRole);
+    } catch (connectionError) {
+      console.error(
+        "Erro de conexão no login:",
+        connectionError
+      );
+
+      setError(
+        "Não foi possível conectar ao servidor. Tente novamente."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (signup) {
+    return (
+      <Signup
+        onBack={() => {
+          setSignup(false);
+          setRole("client");
+          setError("");
+        }}
+      />
+    );
+  }
+
   return (
     <main className="login-page">
       <section className="login-showcase">
-        <div className="login-brand"><span>♨</span><strong>Doce <em>Gestão</em></strong></div>
-        <div className="login-copy"><p>GESTÃO FEITA COM CARINHO</p><h1>Mais tempo para criar.<br />Mais controle para crescer.</h1><span>Organize pedidos, produção e clientes em um só lugar — com a delicadeza que sua confeitaria merece.</span></div>
-        <div className="login-quote"><b>"</b><p>Minha rotina ficou muito mais organizada. Agora consigo focar no que amo: criar doces incríveis.</p><small>Marina Borges • Doce Encanto</small></div>
+        <div className="login-brand">
+          <span>♨</span>
+
+          <strong>
+            Doce <em>Gestão</em>
+          </strong>
+        </div>
+
+        <div className="login-copy">
+          <p>GESTÃO FEITA COM CARINHO</p>
+
+          <h1>
+            Mais tempo para criar.
+            <br />
+            Mais controle para crescer.
+          </h1>
+
+          <span>
+            Organize pedidos, produção e clientes em
+            um só lugar — com a delicadeza que sua
+            confeitaria merece.
+          </span>
+        </div>
+
+        <div className="login-quote">
+          <b>“</b>
+
+          <p>
+            Minha rotina ficou muito mais organizada.
+            Agora consigo focar no que amo: criar doces
+            incríveis.
+          </p>
+
+          <small>
+            Marina Borges • Doce Encanto
+          </small>
+        </div>
+
         <div className="login-rings" />
       </section>
+
       <section className="login-area">
-        <form className="login-card" onSubmit={e => { e.preventDefault(); onLogin(role); }}>
-          <div className="mobile-brand"><span>♨</span><strong>Doce <em>Gestão</em></strong></div>
-          <p className="eyebrow">BEM-VINDO DE VOLTA</p><h2>Acesse sua conta</h2><p className="login-subtitle">Escolha seu tipo de acesso e informe seus dados.</p>
-          <div className="role-switch" aria-label="Tipo de acesso">
-            <button type="button" className={role === "admin" ? "selected" : ""} onClick={() => setRole("admin")}><span>♚</span><b>Administrador</b><small>Gestão completa</small></button>
-            <button type="button" className={role === "client" ? "selected" : ""} onClick={() => setRole("client")}><span>♙</span><b>Cliente</b><small>Meus pedidos</small></button>
+        <form
+          className="login-card"
+          onSubmit={handleLogin}
+        >
+          <div className="mobile-brand">
+            <span>♨</span>
+
+            <strong>
+              Doce <em>Gestão</em>
+            </strong>
           </div>
-          <label className="login-label">E-mail<div className="login-input"><span>✉</span><input required type="email" defaultValue={role === "admin" ? "admin@docegestao.com.br" : "cliente@email.com"} key={role} placeholder="seu@email.com" /></div></label>
-          <label className="login-label">Senha<div className="login-input"><span>⌑</span><input required type={showPassword ? "text" : "password"} defaultValue="123456" /><button type="button" onClick={() => setShowPassword(v => !v)} aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}>{showPassword ? "◉" : "◎"}</button></div></label>
-          <div className="login-options"><label><input type="checkbox" defaultChecked /> Lembrar de mim</label><button type="button">Esqueci minha senha</button></div>
-          <button className="login-submit">Entrar como {role === "admin" ? "administrador" : "cliente"} <span>→</span></button>
-          <div className="demo-note"><span>ⓘ</span><p><strong>Acesso demonstrativo</strong>Os dados já estão preenchidos. Basta clicar em entrar.</p></div>
-          {role === "client" && <p className="signup">Ainda não tem cadastro? <button type="button" onClick={() => setSignup(true)}>Criar minha conta</button></p>}
+
+          <p className="eyebrow">
+            BEM-VINDO DE VOLTA
+          </p>
+
+          <h2>Acesse sua conta</h2>
+
+          <p className="login-subtitle">
+            Escolha seu tipo de acesso e informe seus
+            dados.
+          </p>
+
+          <div
+            className="role-switch"
+            aria-label="Tipo de acesso"
+          >
+            <button
+              type="button"
+              className={
+                role === "admin" ? "selected" : ""
+              }
+              onClick={() => {
+                setRole("admin");
+                setError("");
+              }}
+            >
+              <span>♚</span>
+              <b>Administrador</b>
+              <small>Gestão completa</small>
+            </button>
+
+            <button
+              type="button"
+              className={
+                role === "client" ? "selected" : ""
+              }
+              onClick={() => {
+                setRole("client");
+                setError("");
+              }}
+            >
+              <span>♙</span>
+              <b>Cliente</b>
+              <small>Meus pedidos</small>
+            </button>
+          </div>
+
+          <label className="login-label">
+            E-mail
+
+            <div className="login-input">
+              <span>✉</span>
+
+              <input
+                required
+                type="email"
+                name="email"
+                placeholder="seu@email.com"
+                autoComplete="email"
+              />
+            </div>
+          </label>
+
+          <label className="login-label">
+            Senha
+
+            <div className="login-input">
+              <span>⌑</span>
+
+              <input
+                required
+                type={
+                  showPassword ? "text" : "password"
+                }
+                name="password"
+                placeholder="Sua senha"
+                autoComplete="current-password"
+              />
+
+              <button
+                type="button"
+                onClick={() =>
+                  setShowPassword(value => !value)
+                }
+                aria-label={
+                  showPassword
+                    ? "Ocultar senha"
+                    : "Mostrar senha"
+                }
+              >
+                {showPassword ? "◉" : "◎"}
+              </button>
+            </div>
+          </label>
+
+          <div className="login-options">
+            <label>
+              <input type="checkbox" defaultChecked />
+              Lembrar de mim
+            </label>
+
+            <button type="button">
+              Esqueci minha senha
+            </button>
+          </div>
+
+          {error && (
+            <p className="form-error">
+              {error}
+            </p>
+          )}
+
+          <button
+            className="login-submit"
+            type="submit"
+            disabled={loading}
+          >
+            {loading
+              ? "Entrando..."
+              : `Entrar como ${
+                  role === "admin"
+                    ? "administrador"
+                    : "cliente"
+                }`}
+
+            <span>→</span>
+          </button>
+
+          {role === "client" && (
+            <p className="signup">
+              Ainda não tem cadastro?{" "}
+
+              <button
+                type="button"
+                onClick={() => setSignup(true)}
+              >
+                Criar minha conta
+              </button>
+            </p>
+          )}
         </form>
-        <footer>© 2026 Doce Gestão &nbsp;•&nbsp; Privacidade &nbsp;•&nbsp; Termos de uso</footer>
+
+        <footer>
+          © 2026 Doce Gestão &nbsp;•&nbsp;
+          Privacidade &nbsp;•&nbsp; Termos de uso
+        </footer>
       </section>
     </main>
   );
