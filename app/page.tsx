@@ -64,6 +64,27 @@ function databasePrice(value: string) {
 
   return Number(normalized);
 }
+
+function getProductImagePath(
+  publicUrl: string
+) {
+  const marker =
+    "/storage/v1/object/public/product-images/";
+
+  const markerPosition =
+    publicUrl.indexOf(marker);
+
+  if (markerPosition === -1) {
+    return null;
+  }
+
+  return decodeURIComponent(
+    publicUrl.slice(
+      markerPosition + marker.length
+    )
+  );
+}
+
 function money(value: number) { return value.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }) }
 function getFirstName(fullName: string) {
   return fullName.trim().split(" ")[0] || "Usuário";
@@ -374,7 +395,7 @@ export default function Home() {
     sessionStorage.removeItem(
       "doce-gestao-client-section"
     );
-    
+
     const { error: logoutError } =
       await supabase.auth.signOut();
 
@@ -2292,22 +2313,282 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
     reader.readAsDataURL(file);
   }
   function update( id: Product["id"], patch: Partial<Product>) { onChange(products.map(p => p.id === id ? { ...p, ...patch } : p)) }
+  async function updateExistingProduct(
+    data: FormData,
+    price: number
+  ) {
+    if (!editing) {
+      return;
+    }
+
+    setSaving(true);
+
+    let newImagePath = "";
+    let imageUrl = editing.image;
+
+    try {
+      /*
+      * Se uma nova foto foi selecionada,
+      * envia antes de atualizar o produto.
+      */
+      if (imageFile) {
+        const extension =
+          imageFile.name
+            .split(".")
+            .pop()
+            ?.toLowerCase() || "jpg";
+
+        newImagePath =
+          `products/${crypto.randomUUID()}.${extension}`;
+
+        const {
+          error: uploadError,
+        } = await supabase.storage
+          .from("product-images")
+          .upload(newImagePath, imageFile, {
+            cacheControl: "3600",
+            upsert: false,
+            contentType: imageFile.type,
+          });
+
+        if (uploadError) {
+          console.error(
+            "Erro ao enviar nova imagem:",
+            uploadError
+          );
+
+          onToast(
+            "Não foi possível enviar a nova imagem."
+          );
+
+          return;
+        }
+
+        const {
+          data: publicImageData,
+        } = supabase.storage
+          .from("product-images")
+          .getPublicUrl(newImagePath);
+
+        imageUrl = publicImageData.publicUrl;
+      }
+
+      const optionNames = String(
+        data.get("options") || ""
+      )
+        .split(",")
+        .map(option => option.trim())
+        .filter(Boolean);
+
+      const isFeatured =
+        data.get("featured") === "on";
+
+      const {
+        data: updatedRow,
+        error: updateError,
+      } = await supabase
+        .from("products")
+        .update({
+          name: String(
+            data.get("name") || ""
+          ).trim(),
+          category: String(
+            data.get("category") || ""
+          ),
+          price,
+          description: String(
+            data.get("description") || ""
+          ).trim(),
+          image_url: imageUrl || null,
+          preparation_time: String(
+            data.get("preparation") || ""
+          ).trim(),
+          minimum_order: String(
+            data.get("minimum") || ""
+          ).trim(),
+          stock_quantity:
+            Number(data.get("stock")) || 0,
+          low_stock_limit:
+            Number(data.get("lowStock")) || 0,
+          is_active:
+            data.get("active") === "on",
+          is_archived: editing.archived,
+          is_featured: isFeatured,
+          featured_order: isFeatured
+            ? editing.featuredOrder ||
+              products.length
+            : null,
+          is_customizable:
+            data.get("customizable") === "on",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", editing.id)
+        .select(`
+          id,
+          name,
+          category,
+          price,
+          description,
+          image_url,
+          preparation_time,
+          minimum_order,
+          stock_quantity,
+          low_stock_limit,
+          is_active,
+          is_archived,
+          is_featured,
+          featured_order,
+          is_customizable
+        `)
+        .single();
+
+      if (updateError || !updatedRow) {
+        console.error(
+          "Erro ao atualizar produto:",
+          updateError
+        );
+
+        if (newImagePath) {
+          await supabase.storage
+            .from("product-images")
+            .remove([newImagePath]);
+        }
+
+        onToast(
+          "Não foi possível atualizar o produto."
+        );
+
+        return;
+      }
+
+      /*
+      * Remove as opções antigas.
+      */
+      const {
+        error: deleteOptionsError,
+      } = await supabase
+        .from("product_options")
+        .delete()
+        .eq("product_id", editing.id);
+
+      if (deleteOptionsError) {
+        console.error(
+          "Erro ao remover opções antigas:",
+          deleteOptionsError
+        );
+
+        onToast(
+          "O produto foi atualizado, mas ocorreu um erro nas personalizações."
+        );
+
+        return;
+      }
+
+      /*
+      * Cadastra novamente as opções informadas.
+      */
+      if (optionNames.length > 0) {
+        const {
+          error: optionsError,
+        } = await supabase
+          .from("product_options")
+          .insert(
+            optionNames.map(optionName => ({
+              product_id: editing.id,
+              option_name: optionName,
+              option_value: "A combinar",
+              additional_price: 0,
+              is_active: true,
+            }))
+          );
+
+        if (optionsError) {
+          console.error(
+            "Erro ao atualizar personalizações:",
+            optionsError
+          );
+
+          onToast(
+            "O produto foi atualizado, mas não foi possível salvar as personalizações."
+          );
+
+          return;
+        }
+      }
+
+      /*
+      * A nova imagem funcionou.
+      * Agora podemos remover a antiga.
+      */
+      if (
+        imageFile &&
+        editing.image &&
+        editing.image !== imageUrl
+      ) {
+        const oldImagePath =
+          getProductImagePath(editing.image);
+
+        if (oldImagePath) {
+          const {
+            error: removeImageError,
+          } = await supabase.storage
+            .from("product-images")
+            .remove([oldImagePath]);
+
+          if (removeImageError) {
+            console.error(
+              "Produto atualizado, mas a imagem antiga não foi removida:",
+              removeImageError
+            );
+          }
+        }
+      }
+
+      const updatedProduct: Product = {
+        ...mapProduct(
+          updatedRow as ProductRow
+        ),
+        options: optionNames,
+      };
+
+      onChange(
+        products.map(product =>
+          product.id === editing.id
+            ? updatedProduct
+            : product
+        )
+      );
+
+      setEditing(null);
+      setImage("");
+      setImageFile(null);
+      setOpen(false);
+
+      onToast("Produto atualizado com sucesso!");
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao editar produto:",
+        error
+      );
+
+      if (newImagePath) {
+        await supabase.storage
+          .from("product-images")
+          .remove([newImagePath]);
+      }
+
+      onToast(
+        "Ocorreu um erro ao editar o produto."
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function submit(
     e: React.FormEvent<HTMLFormElement>
   ) {
     e.preventDefault();
-
-    if (editing) {
-      onToast(
-        "A edição será conectada na próxima etapa."
-      );
-      return;
-    }
-
-    if (!imageFile) {
-      onToast("Selecione uma foto para o produto.");
-      return;
-    }
 
     const form = e.currentTarget;
     const data = new FormData(form);
@@ -2318,6 +2599,16 @@ function Catalog({ products, onChange, onToast }: { products: Product[]; onChang
 
     if (!Number.isFinite(price) || price <= 0) {
       onToast("Informe um preço válido.");
+      return;
+    }
+
+    if (editing) {
+      await updateExistingProduct(data, price);
+      return;
+    }
+
+    if (!imageFile) {
+      onToast("Selecione uma foto para o produto.");
       return;
     }
 
