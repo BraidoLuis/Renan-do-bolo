@@ -58,119 +58,647 @@ function Status({ children }: { children: string }) {
 }
 
 export default function Home() {
+  const [role, setRole] =
+    useState<Role | null>(null);
 
-  useEffect(() => {
-    async function testConnection() {
-      const { data, error } = await supabase
-        .from("products")
-        .select("id, name")
-        .limit(1);
+  const [authLoading, setAuthLoading] =
+    useState(true);
 
-      if (error) {
-        console.error("Erro ao conectar com o Supabase:", error);
-        return;
-      }
+  const [screen, setScreen] =
+    useState<Screen>("Visão geral");
 
-      console.log("Supabase conectado com sucesso:", data);
-    }
-
-    testConnection();
-  }, []);
-  const [role, setRole] = useState<Role | null>(null);
-  const [screen, setScreen] = useState<Screen>("Visão geral");
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(false);
   const [toast, setToast] = useState("");
-  const [mobileNav, setMobileNav] = useState(false);
-  const [products, setProducts] = useState<Product[]>(initialProducts);
-  const [appOrders, setAppOrders] = useState(orders);
-  const [quotes, setQuotes] = useState<Quote[]>(initialQuotes);
-  const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [notifications, setNotifications] = useState([
-    "Novo pedido de orçamento recebido",
-    "Estoque baixo: Torta de Limão",
-    "Ana solicitou reagendamento do pedido #1048"
-  ]);
 
-  const filteredOrders = useMemo(() => appOrders.filter(o =>
-    `${o.client} ${o.item} ${o.id}`.toLowerCase().includes(query.toLowerCase())
-  ), [query, appOrders]);
+  const [mobileNav, setMobileNav] =
+    useState(false);
 
-  function saveOrder(e: React.FormEvent<HTMLFormElement>) {
+  const [products, setProducts] =
+    useState<Product[]>(initialProducts);
+
+  const [appOrders, setAppOrders] =
+    useState(orders);
+
+  const [quotes, setQuotes] =
+    useState<Quote[]>(initialQuotes);
+
+  const [
+    notificationsOpen,
+    setNotificationsOpen,
+  ] = useState(false);
+
+  const [notifications, setNotifications] =
+    useState([
+      "Novo pedido de orçamento recebido",
+      "Estoque baixo: Torta de Limão",
+      "Ana solicitou reagendamento do pedido #1048",
+    ]);
+
+  /*
+   * Recupera a sessão do Supabase quando
+   * o usuário atualiza ou reabre a página.
+   */
+  useEffect(() => {
+    let componentActive = true;
+
+    async function restoreSession() {
+      try {
+        const {
+          data: { session },
+          error: sessionError,
+        } = await supabase.auth.getSession();
+
+        if (!componentActive) {
+          return;
+        }
+
+        if (sessionError) {
+          console.error(
+            "Erro ao recuperar sessão:",
+            sessionError
+          );
+
+          setRole(null);
+          return;
+        }
+
+        if (!session?.user) {
+          setRole(null);
+          return;
+        }
+
+        const {
+          data: profile,
+          error: profileError,
+        } = await supabase
+          .from("profiles")
+          .select("role")
+          .eq("id", session.user.id)
+          .single();
+
+        if (!componentActive) {
+          return;
+        }
+
+        if (profileError || !profile) {
+          console.error(
+            "Erro ao recuperar perfil:",
+            profileError
+          );
+
+          await supabase.auth.signOut();
+          setRole(null);
+          return;
+        }
+
+        if (
+          profile.role !== "admin" &&
+          profile.role !== "client"
+        ) {
+          await supabase.auth.signOut();
+          setRole(null);
+          return;
+        }
+
+        setRole(profile.role as Role);
+      } catch (connectionError) {
+        console.error(
+          "Erro ao restaurar a sessão:",
+          connectionError
+        );
+
+        setRole(null);
+      } finally {
+        if (componentActive) {
+          setAuthLoading(false);
+        }
+      }
+    }
+
+    restoreSession();
+
+    return () => {
+      componentActive = false;
+    };
+  }, []);
+
+  const filteredOrders = useMemo(
+    () =>
+      appOrders.filter(order =>
+        `${order.client} ${order.item} ${order.id}`
+          .toLowerCase()
+          .includes(query.toLowerCase())
+      ),
+    [query, appOrders]
+  );
+
+  function saveOrder(
+    e: React.FormEvent<HTMLFormElement>
+  ) {
     e.preventDefault();
+
     setModal(false);
     setToast("Pedido cadastrado com sucesso!");
-    setTimeout(() => setToast(""), 2800);
+
+    setTimeout(() => {
+      setToast("");
+    }, 2800);
   }
 
-  if (!role) return <Login onLogin={setRole} />;
-  if (role === "client") return <ClientPortal products={products.filter(p => !p.archived)} orders={appOrders} quotes={quotes} onQuote={(id, status) => { setQuotes(current => current.map(q => q.id === id ? { ...q, status } : q)); setNotifications(current => [`Cliente respondeu ao orçamento ${id}`, ...current]) }} onOrderRequest={(id, request) => { setAppOrders(current => current.map(o => o.id === id ? { ...o, request } : o)); setNotifications(current => [`Nova solicitação no pedido ${id}: ${request}`, ...current]) }} onLogout={() => setRole(null)} />;
+  async function handleLogout() {
+    const { error: logoutError } =
+      await supabase.auth.signOut();
 
+    if (logoutError) {
+      console.error(
+        "Erro ao sair da conta:",
+        logoutError
+      );
+
+      setToast(
+        "Não foi possível sair da conta. Tente novamente."
+      );
+
+      setTimeout(() => {
+        setToast("");
+      }, 2800);
+
+      return;
+    }
+
+    setRole(null);
+    setScreen("Visão geral");
+  }
+
+  /*
+   * Enquanto o Supabase verifica a sessão,
+   * não mostra o login nem os painéis.
+   */
+  if (authLoading) {
+    return (
+      <main className="account-created">
+        <section>
+          <span>♨</span>
+
+          <p className="eyebrow">
+            DOCE GESTÃO
+          </p>
+
+          <h1>Carregando sua conta...</h1>
+
+          <p>
+            Estamos verificando sua sessão com
+            segurança.
+          </p>
+        </section>
+      </main>
+    );
+  }
+
+  /*
+   * Sem usuário autenticado, mostra o login.
+   */
+  if (!role) {
+    return <Login onLogin={setRole} />;
+  }
+
+  /*
+   * Usuário com role client.
+   */
+  if (role === "client") {
+    return (
+      <ClientPortal
+        products={products.filter(
+          product => !product.archived
+        )}
+        orders={appOrders}
+        quotes={quotes}
+        onQuote={(id, status) => {
+          setQuotes(current =>
+            current.map(quote =>
+              quote.id === id
+                ? {
+                    ...quote,
+                    status,
+                  }
+                : quote
+            )
+          );
+
+          setNotifications(current => [
+            `Cliente respondeu ao orçamento ${id}`,
+            ...current,
+          ]);
+        }}
+        onOrderRequest={(id, request) => {
+          setAppOrders(current =>
+            current.map(order =>
+              order.id === id
+                ? {
+                    ...order,
+                    request,
+                  }
+                : order
+            )
+          );
+
+          setNotifications(current => [
+            `Nova solicitação no pedido ${id}: ${request}`,
+            ...current,
+          ]);
+        }}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  /*
+   * Usuário com role admin.
+   */
   return (
     <main className="app-shell">
-      <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
-        <button className="close-menu" onClick={() => setMobileNav(false)} aria-label="Fechar menu">×</button>
-        <div className="brand"><span className="cake">♨</span><strong>Doce<br /><em>Gestão</em></strong></div>
-        <div className="ornament"><span />✤<span /></div>
+      <aside
+        className={`sidebar ${
+          mobileNav ? "open" : ""
+        }`}
+      >
+        <button
+          className="close-menu"
+          onClick={() => setMobileNav(false)}
+          aria-label="Fechar menu"
+        >
+          ×
+        </button>
+
+        <div className="brand">
+          <span className="cake">♨</span>
+
+          <strong>
+            Doce
+            <br />
+            <em>Gestão</em>
+          </strong>
+        </div>
+
+        <div className="ornament">
+          <span />
+          ✤
+          <span />
+        </div>
+
         <nav>
           {nav.map(item => (
-            <button key={item.label} className={screen === item.label ? "active" : ""} onClick={() => { setScreen(item.label); setMobileNav(false); }}>
-              <b>{item.icon}</b>{item.label}
+            <button
+              key={item.label}
+              className={
+                screen === item.label
+                  ? "active"
+                  : ""
+              }
+              onClick={() => {
+                setScreen(item.label);
+                setMobileNav(false);
+              }}
+            >
+              <b>{item.icon}</b>
+              {item.label}
             </button>
           ))}
         </nav>
-        <button className="new-order side" onClick={() => setModal(true)}><span>＋</span>Novo pedido</button>
+
+        <button
+          className="new-order side"
+          onClick={() => setModal(true)}
+        >
+          <span>＋</span>
+          Novo pedido
+        </button>
+
         <div className="side-art" />
       </aside>
 
       <section className="workspace">
         <header className="topbar">
-          <button className="menu" onClick={() => setMobileNav(true)} aria-label="Abrir menu">☰</button>
+          <button
+            className="menu"
+            onClick={() => setMobileNav(true)}
+            aria-label="Abrir menu"
+          >
+            ☰
+          </button>
+
           <div>
-            <p className="eyebrow">QUINTA-FEIRA, 23 DE JULHO</p>
-            <h1>{screen === "Visão geral" ? "Bom dia, Marina" : screen}</h1>
-            <p>{screen === "Visão geral" ? "Aqui está o resumo da sua confeitaria hoje." : `Gerencie ${screen.toLowerCase()} da sua confeitaria.`}</p>
+            <p className="eyebrow">
+              QUINTA-FEIRA, 23 DE JULHO
+            </p>
+
+            <h1>
+              {screen === "Visão geral"
+                ? "Bom dia, Marina"
+                : screen}
+            </h1>
+
+            <p>
+              {screen === "Visão geral"
+                ? "Aqui está o resumo da sua confeitaria hoje."
+                : `Gerencie ${screen.toLowerCase()} da sua confeitaria.`}
+            </p>
           </div>
+
           <div className="header-actions">
-            <label className="search"><span>⌕</span><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar..." /></label>
-            <button className="bell" aria-label="Notificações" onClick={() => setNotificationsOpen(v => !v)}>♧<i /></button>
+            <label className="search">
+              <span>⌕</span>
+
+              <input
+                value={query}
+                onChange={e =>
+                  setQuery(e.target.value)
+                }
+                placeholder="Buscar..."
+              />
+            </label>
+
+            <button
+              className="bell"
+              aria-label="Notificações"
+              onClick={() =>
+                setNotificationsOpen(value => !value)
+              }
+            >
+              ♧
+              <i />
+            </button>
+
             <div className="avatar">MB</div>
-            <button className="user user-button" onClick={() => setRole(null)} title="Sair da conta"><strong>Marina Borges</strong><small>Administradora • Sair</small></button>
+
+            <button
+              className="user user-button"
+              onClick={handleLogout}
+              title="Sair da conta"
+            >
+              <strong>Marina Borges</strong>
+
+              <small>
+                Administradora • Sair
+              </small>
+            </button>
           </div>
         </header>
 
-        {screen === "Visão geral" && <Dashboard setScreen={setScreen} openModal={() => setModal(true)} orders={filteredOrders.slice(0, 3)} />}
-        {screen === "Pedidos" && <Orders orders={filteredOrders} openModal={() => setModal(true)} onStatus={(id, status) => { setAppOrders(current => current.map(o => o.id === id ? { ...o, status } : o)); setToast(`Status do pedido ${id} atualizado!`); setTimeout(() => setToast(""), 2800) }} />}
-        {screen === "Orçamentos" && <AdminQuotes quotes={quotes} onUpdate={(id, value, status) => { setQuotes(current => current.map(q => q.id === id ? { ...q, value, status } : q)); setNotifications(current => [`Orçamento ${id} atualizado`, ...current]) }} />}
-        {screen === "Produção" && <Production />}
-        {screen === "Cardápio" && <Catalog products={products} onChange={setProducts} onToast={message => { setToast(message); setTimeout(() => setToast(""), 2800) }} />}
-        {screen === "Estoque" && <Inventory products={products.filter(p => !p.archived)} onStock={(id, stock) => setProducts(current => current.map(p => p.id === id ? { ...p, stock } : p))} />}
-        {screen === "Clientes" && <Clients />}
-        {screen === "Financeiro" && <Finance />}
-        {screen === "Relatórios" && <Reports />}
-        {screen === "Configurações" && <Settings />}
+        {screen === "Visão geral" && (
+          <Dashboard
+            setScreen={setScreen}
+            openModal={() => setModal(true)}
+            orders={filteredOrders.slice(0, 3)}
+          />
+        )}
+
+        {screen === "Pedidos" && (
+          <Orders
+            orders={filteredOrders}
+            openModal={() => setModal(true)}
+            onStatus={(id, status) => {
+              setAppOrders(current =>
+                current.map(order =>
+                  order.id === id
+                    ? {
+                        ...order,
+                        status,
+                      }
+                    : order
+                )
+              );
+
+              setToast(
+                `Status do pedido ${id} atualizado!`
+              );
+
+              setTimeout(() => {
+                setToast("");
+              }, 2800);
+            }}
+          />
+        )}
+
+        {screen === "Orçamentos" && (
+          <AdminQuotes
+            quotes={quotes}
+            onUpdate={(id, value, status) => {
+              setQuotes(current =>
+                current.map(quote =>
+                  quote.id === id
+                    ? {
+                        ...quote,
+                        value,
+                        status,
+                      }
+                    : quote
+                )
+              );
+
+              setNotifications(current => [
+                `Orçamento ${id} atualizado`,
+                ...current,
+              ]);
+            }}
+          />
+        )}
+
+        {screen === "Produção" && (
+          <Production />
+        )}
+
+        {screen === "Cardápio" && (
+          <Catalog
+            products={products}
+            onChange={setProducts}
+            onToast={message => {
+              setToast(message);
+
+              setTimeout(() => {
+                setToast("");
+              }, 2800);
+            }}
+          />
+        )}
+
+        {screen === "Estoque" && (
+          <Inventory
+            products={products.filter(
+              product => !product.archived
+            )}
+            onStock={(id, stock) => {
+              setProducts(current =>
+                current.map(product =>
+                  product.id === id
+                    ? {
+                        ...product,
+                        stock,
+                      }
+                    : product
+                )
+              );
+            }}
+          />
+        )}
+
+        {screen === "Clientes" && (
+          <Clients />
+        )}
+
+        {screen === "Financeiro" && (
+          <Finance />
+        )}
+
+        {screen === "Relatórios" && (
+          <Reports />
+        )}
+
+        {screen === "Configurações" && (
+          <Settings />
+        )}
       </section>
-      {notificationsOpen && <NotificationPanel items={notifications} onClose={() => setNotificationsOpen(false)} onRead={() => setNotifications([])} />}
+
+      {notificationsOpen && (
+        <NotificationPanel
+          items={notifications}
+          onClose={() =>
+            setNotificationsOpen(false)
+          }
+          onRead={() => setNotifications([])}
+        />
+      )}
 
       {modal && (
-        <div className="modal-backdrop" onMouseDown={e => e.currentTarget === e.target && setModal(false)}>
-          <form className="modal" onSubmit={saveOrder}>
-            <div className="modal-title"><div><p>NOVO PEDIDO</p><h2>Adicionar encomenda</h2></div><button type="button" onClick={() => setModal(false)}>×</button></div>
-            <div className="form-grid">
-              <label>Cliente<input required placeholder="Nome do cliente" /></label>
-              <label>Telefone<input required placeholder="(22) 99999-9999" /></label>
-              <label className="wide">Produto<select><option>Bolo Red Velvet</option><option>Torta de Limão</option><option>Kit Festa 30 pessoas</option><option>Pedido personalizado</option></select></label>
-              <label>Data da entrega<input required type="date" /></label>
-              <label>Horário<input required type="time" /></label>
-              <label>Valor<input required placeholder="R$ 0,00" /></label>
-              <label>Status<select><option>Aguardando</option><option>Confirmado</option><option>Em produção</option></select></label>
-              <label className="wide">Observações<textarea placeholder="Detalhes, decoração, sabor, restrições..." /></label>
+        <div
+          className="modal-backdrop"
+          onMouseDown={event => {
+            if (
+              event.currentTarget === event.target
+            ) {
+              setModal(false);
+            }
+          }}
+        >
+          <form
+            className="modal"
+            onSubmit={saveOrder}
+          >
+            <div className="modal-title">
+              <div>
+                <p>NOVO PEDIDO</p>
+                <h2>Adicionar encomenda</h2>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setModal(false)}
+              >
+                ×
+              </button>
             </div>
-            <div className="modal-actions"><button type="button" className="secondary" onClick={() => setModal(false)}>Cancelar</button><button className="primary">Salvar pedido</button></div>
+
+            <div className="form-grid">
+              <label>
+                Cliente
+
+                <input
+                  required
+                  placeholder="Nome do cliente"
+                />
+              </label>
+
+              <label>
+                Telefone
+
+                <input
+                  required
+                  placeholder="(22) 99999-9999"
+                />
+              </label>
+
+              <label className="wide">
+                Produto
+
+                <select>
+                  <option>
+                    Bolo Red Velvet
+                  </option>
+
+                  <option>
+                    Torta de Limão
+                  </option>
+
+                  <option>
+                    Kit Festa 30 pessoas
+                  </option>
+
+                  <option>
+                    Pedido personalizado
+                  </option>
+                </select>
+              </label>
+
+              <label>
+                Data da entrega
+                <input required type="date" />
+              </label>
+
+              <label>
+                Horário
+                <input required type="time" />
+              </label>
+
+              <label>
+                Valor
+                <input
+                  required
+                  placeholder="R$ 0,00"
+                />
+              </label>
+
+              <label>
+                Status
+
+                <select>
+                  <option>Aguardando</option>
+                  <option>Confirmado</option>
+                  <option>Em produção</option>
+                </select>
+              </label>
+
+              <label className="wide">
+                Observações
+
+                <textarea
+                  placeholder="Detalhes, decoração, sabor, restrições..."
+                />
+              </label>
+            </div>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setModal(false)}
+              >
+                Cancelar
+              </button>
+
+              <button className="primary">
+                Salvar pedido
+              </button>
+            </div>
           </form>
         </div>
       )}
-      {toast && <div className="toast">✓ {toast}</div>}
+
+      {toast && (
+        <div className="toast">
+          ✓ {toast}
+        </div>
+      )}
     </main>
   );
 }
