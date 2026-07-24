@@ -37,6 +37,49 @@ type UserProfile = {
   role: Role;
 };
 
+type AdminOrderItemRow = {
+  product_name: string;
+  quantity: number;
+};
+
+type AdminOrderRow = {
+  id: string;
+  order_number: number | string;
+  customer_name: string;
+  customer_phone: string | null;
+  status: string;
+  payment_status: string;
+  total_amount: number | string;
+  delivery_date: string | null;
+  delivery_time: string | null;
+  request_type: string | null;
+  request_status: string | null;
+  requested_delivery_date: string | null;
+  requested_delivery_time: string | null;
+  request_reason: string | null;
+  created_at: string;
+  order_items: AdminOrderItemRow[];
+};
+
+type AppOrder = {
+  databaseId: string;
+  id: string;
+  client: string;
+  initials: string;
+  item: string;
+  time: string;
+  date: string;
+  value: string;
+  status: string;
+  statusCode: string;
+  request?: string;
+
+  requestType: string | null;
+  requestStatus: string | null;
+  requestedDate: string | null;
+  requestedTime: string | null;
+};
+
 type Product = {
   id: string | number;
   name: string;
@@ -197,6 +240,21 @@ function orderStatusLabel(status: string) {
   return labels[status] || status;
 }
 
+function orderStatusCode(label: string) {
+  const codes: Record<string, string> = {
+    Aguardando: "pending",
+    Confirmado: "confirmed",
+    "Aguardando pagamento":
+      "awaiting_payment",
+    "Em produção": "in_production",
+    Pronto: "ready",
+    Entregue: "completed",
+    Cancelado: "cancelled",
+  };
+
+  return codes[label] || "pending";
+}
+
 function formatOrderDate(date: string) {
   return new Date(date).toLocaleDateString(
     "pt-BR",
@@ -220,6 +278,73 @@ function formatDeliveryDate(
   ).toLocaleDateString("pt-BR");
 }
 
+function mapAdminOrder(
+  order: AdminOrderRow
+): AppOrder {
+  let request: string | undefined;
+
+  if (
+    order.request_status === "pending" &&
+    order.request_type === "cancellation"
+  ) {
+    request = "Cancelamento solicitado";
+  }
+
+  if (
+    order.request_status === "pending" &&
+    order.request_type === "reschedule"
+  ) {
+    request =
+      `Reagendamento solicitado para ${
+        formatDeliveryDate(
+          order.requested_delivery_date
+        )
+      }${
+        order.requested_delivery_time
+          ? ` às ${order.requested_delivery_time.slice(
+              0,
+              5
+            )}`
+          : ""
+      }`;
+  }
+
+  return {
+    databaseId: order.id,
+    id: `#${order.order_number}`,
+    client: order.customer_name,
+    initials: getInitials(
+      order.customer_name
+    ),
+    item: order.order_items
+      .map(
+        item =>
+          `${item.quantity}× ${item.product_name}`
+      )
+      .join(", "),
+    time: order.delivery_time
+      ? order.delivery_time.slice(0, 5)
+      : "A combinar",
+    date: order.delivery_date
+      ? formatDeliveryDate(
+          order.delivery_date
+        )
+      : "Data a combinar",
+    value: money(
+      Number(order.total_amount)
+    ),
+    status: orderStatusLabel(order.status),
+    statusCode: order.status,
+    request,
+    requestType: order.request_type,
+    requestStatus: order.request_status,
+    requestedDate:
+      order.requested_delivery_date,
+    requestedTime:
+      order.requested_delivery_time,
+  };
+}
+
 const nav: { label: Screen; icon: string }[] = [
   { label: "Visão geral", icon: "⌂" },
   { label: "Pedidos", icon: "▢" },
@@ -233,25 +358,12 @@ const nav: { label: Screen; icon: string }[] = [
   { label: "Configurações", icon: "⚙" },
 ];
 
-const orders = [
-  { id: "#1048", client: "Ana Ribeiro", initials: "AR", item: "Bolo Red Velvet", time: "10:30", date: "Hoje", value: "R$ 320,00", status: "Em produção" },
-  { id: "#1049", client: "Carlos Mendes", initials: "CM", item: "Kit Festa 30 pessoas", time: "12:00", date: "Hoje", value: "R$ 485,00", status: "Confirmado" },
-  { id: "#1050", client: "Beatriz Lima", initials: "BL", item: "Torta de Limão", time: "14:30", date: "Hoje", value: "R$ 148,00", status: "Aguardando" },
-  { id: "#1051", client: "Mariana Costa", initials: "MC", item: "50 Brigadeiros gourmet", time: "16:00", date: "Hoje", value: "R$ 225,00", status: "Confirmado" },
-  { id: "#1052", client: "Paulo Nunes", initials: "PN", item: "Bolo de casamento", time: "09:00", date: "Amanhã", value: "R$ 890,00", status: "Pendente" },
-];
 
 const initialQuotes: Quote[] = [
   { id: "ORC-204", client: "Ana Ribeiro", item: "Bolo de aniversário personalizado", details: "Tema floral, 40 pessoas, recheio de ninho com morango.", value: "R$ 420,00", status: "Aguardando cliente", date: "30 jul" },
   { id: "ORC-205", client: "Carlos Mendes", item: "Mesa de doces", details: "200 doces variados e montagem no local.", value: "R$ 780,00", status: "Em análise", date: "02 ago" }
 ];
 
-const clients = [
-  { name: "Ana Ribeiro", email: "ana.ribeiro@email.com", orders: 8, spent: "R$ 1.840", initials: "AR" },
-  { name: "Carlos Mendes", email: "carlos@email.com", orders: 5, spent: "R$ 1.225", initials: "CM" },
-  { name: "Beatriz Lima", email: "bia.lima@email.com", orders: 11, spent: "R$ 2.460", initials: "BL" },
-  { name: "Mariana Costa", email: "mariana@email.com", orders: 4, spent: "R$ 890", initials: "MC" },
-];
 
 function Status({ children }: { children: string }) {
   const cls = children.toLowerCase().replace(" ", "-").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -282,7 +394,17 @@ export default function Home() {
     useState<Product[]>([]);
 
   const [appOrders, setAppOrders] =
-    useState(orders);
+    useState<AppOrder[]>([]);
+
+  const [
+    updatingOrderId,
+    setUpdatingOrderId,
+  ] = useState<string | null>(null);
+
+  const [
+    resolvingRequestId,
+    setResolvingRequestId,
+  ] = useState<string | null>(null);
 
   const [quotes, setQuotes] =
     useState<Quote[]>(initialQuotes);
@@ -462,6 +584,80 @@ export default function Home() {
     };
   }, [authLoading, role]);
 
+  useEffect(() => {
+    if (authLoading || role !== "admin") {
+      return;
+    }
+
+    let componentActive = true;
+
+    async function loadAdminOrders() {
+      const {
+        data,
+        error: ordersError,
+      } = await supabase
+        .from("orders")
+        .select(`
+          id,
+          order_number,
+          customer_name,
+          customer_phone,
+          status,
+          payment_status,
+          total_amount,
+          delivery_date,
+          delivery_time,
+          request_type,
+          request_status,
+          requested_delivery_date,
+          requested_delivery_time,
+          request_reason,
+          created_at,
+          order_items (
+            product_name,
+            quantity
+          )
+        `)
+        .order("created_at", {
+          ascending: false,
+        });
+
+      if (!componentActive) {
+        return;
+      }
+
+      if (ordersError) {
+        console.error(
+          "Erro ao carregar pedidos do administrador:",
+          ordersError
+        );
+
+        setToast(
+          "Não foi possível carregar os pedidos."
+        );
+
+        setTimeout(() => {
+          setToast("");
+        }, 2800);
+
+        return;
+      }
+
+      const orderRows =
+        (data || []) as AdminOrderRow[];
+
+      setAppOrders(
+        orderRows.map(mapAdminOrder)
+      );
+    }
+
+    loadAdminOrders();
+
+    return () => {
+      componentActive = false;
+    };
+  }, [authLoading, role]);
+
   const filteredOrders = useMemo(
     () =>
       appOrders.filter(order =>
@@ -471,6 +667,189 @@ export default function Home() {
       ),
     [query, appOrders]
   );
+
+  async function handleOrderStatusChange(
+      databaseId: string,
+      newStatusLabel: string
+    ) {
+      const newStatusCode =
+        orderStatusCode(newStatusLabel);
+
+      setUpdatingOrderId(databaseId);
+
+      try {
+        const {
+          error: statusError,
+        } = await supabase
+          .from("orders")
+          .update({
+            status: newStatusCode,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", databaseId);
+
+        if (statusError) {
+          console.error(
+            "Erro ao atualizar status:",
+            statusError
+          );
+
+          setToast(
+            "Não foi possível atualizar o status."
+          );
+
+          setTimeout(() => {
+            setToast("");
+          }, 2800);
+
+          return;
+        }
+
+        setAppOrders(currentOrders =>
+          currentOrders.map(order =>
+            order.databaseId === databaseId
+              ? {
+                  ...order,
+                  status: newStatusLabel,
+                  statusCode: newStatusCode,
+                }
+              : order
+          )
+        );
+
+        setToast(
+          "Status do pedido atualizado!"
+        );
+
+        setTimeout(() => {
+          setToast("");
+        }, 2000);
+      } catch (error) {
+        console.error(
+          "Erro inesperado ao atualizar status:",
+          error
+        );
+
+        setToast(
+          "Ocorreu um erro ao atualizar o status."
+        );
+
+        setTimeout(() => {
+          setToast("");
+        }, 2800);
+      } finally {
+        setUpdatingOrderId(null);
+      }
+    }
+
+    async function resolveOrderRequest(
+    order: AppOrder,
+    decision: "approved" | "rejected"
+  ) {
+    setResolvingRequestId(order.databaseId);
+
+    try {
+      const {
+        error: resolveError,
+      } = await supabase.rpc(
+        "resolve_order_request",
+        {
+          p_order_id: order.databaseId,
+          p_decision: decision,
+        }
+      );
+
+      if (resolveError) {
+        console.error(
+          "Erro ao responder solicitação:",
+          resolveError
+        );
+
+        setToast(
+          "Não foi possível responder à solicitação."
+        );
+
+        setTimeout(() => {
+          setToast("");
+        }, 2800);
+
+        return;
+      }
+
+      setAppOrders(currentOrders =>
+        currentOrders.map(currentOrder => {
+          if (
+            currentOrder.databaseId !==
+            order.databaseId
+          ) {
+            return currentOrder;
+          }
+
+          if (decision === "rejected") {
+            return {
+              ...currentOrder,
+              request: undefined,
+              requestStatus: "rejected",
+            };
+          }
+
+          if (
+            currentOrder.requestType ===
+            "cancellation"
+          ) {
+            return {
+              ...currentOrder,
+              status: "Cancelado",
+              statusCode: "cancelled",
+              request: undefined,
+              requestStatus: "approved",
+            };
+          }
+
+          return {
+            ...currentOrder,
+            date: currentOrder.requestedDate
+              ? formatDeliveryDate(
+                  currentOrder.requestedDate
+                )
+              : currentOrder.date,
+            time:
+              currentOrder.requestedTime?.slice(
+                0,
+                5
+              ) || currentOrder.time,
+            request: undefined,
+            requestStatus: "approved",
+          };
+        })
+      );
+
+      setToast(
+        decision === "approved"
+          ? "Solicitação aprovada!"
+          : "Solicitação rejeitada!"
+      );
+
+      setTimeout(() => {
+        setToast("");
+      }, 2200);
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao responder solicitação:",
+        error
+      );
+
+      setToast(
+        "Ocorreu um erro ao responder à solicitação."
+      );
+
+      setTimeout(() => {
+        setToast("");
+      }, 2800);
+    } finally {
+      setResolvingRequestId(null);
+    }
+  }
 
   function saveOrder(
     e: React.FormEvent<HTMLFormElement>
@@ -650,23 +1029,7 @@ export default function Home() {
             ...current,
           ]);
         }}
-        onOrderRequest={(id, request) => {
-          setAppOrders(current =>
-            current.map(order =>
-              order.id === id
-                ? {
-                    ...order,
-                    request,
-                  }
-                : order
-            )
-          );
 
-          setNotifications(current => [
-            `Nova solicitação no pedido ${id}: ${request}`,
-            ...current,
-          ]);
-        }}
         onLogout={handleLogout}
       />
     );
@@ -825,26 +1188,10 @@ export default function Home() {
           <Orders
             orders={filteredOrders}
             openModal={() => setModal(true)}
-            onStatus={(id, status) => {
-              setAppOrders(current =>
-                current.map(order =>
-                  order.id === id
-                    ? {
-                        ...order,
-                        status,
-                      }
-                    : order
-                )
-              );
-
-              setToast(
-                `Status do pedido ${id} atualizado!`
-              );
-
-              setTimeout(() => {
-                setToast("");
-              }, 2800);
-            }}
+            onStatus={handleOrderStatusChange}
+            updatingOrderId={updatingOrderId}
+            onResolveRequest={resolveOrderRequest}
+            resolvingRequestId={resolvingRequestId}
           />
         )}
 
@@ -873,7 +1220,7 @@ export default function Home() {
         )}
 
         {screen === "Produção" && (
-          <Production />
+          <Production orders={appOrders} />
         )}
 
         {screen === "Cardápio" && (
@@ -900,7 +1247,7 @@ export default function Home() {
         )}
 
         {screen === "Clientes" && (
-          <Clients />
+          <Clients orders={appOrders} />
         )}
 
         {screen === "Financeiro" && (
@@ -1935,7 +2282,7 @@ type ClientSection =
   | "avaliacao"
   | "perfil"
   ;
-function ClientPortal({ userName, products, quotes, onQuote, onOrderRequest, onLogout }: {  userName: string; products: Product[]; quotes: Quote[]; onQuote: (id: string, status: string) => void; onOrderRequest: (id: string, request: string) => void; onLogout: () => void }) {
+function ClientPortal({ userName, products, quotes, onQuote, onLogout }: {  userName: string; products: Product[]; quotes: Quote[]; onQuote: (id: string, status: string) => void; onLogout: () => void }) {
   const [section, setSection] =
   useState<ClientSection>("inicio");
   const [clientOrders, setClientOrders] =
@@ -1957,6 +2304,7 @@ function ClientPortal({ userName, products, quotes, onQuote, onOrderRequest, onL
   const [cartOpen, setCartOpen] = useState(false);
   const [cartToast, setCartToast] = useState("");
   const [requestOrder, setRequestOrder] = useState<string | null>(null);
+  const [requestLoading, setRequestLoading,] = useState<string | null>(null);
   const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
   useEffect(() => {
     const savedSection =
@@ -2156,6 +2504,128 @@ function ClientPortal({ userName, products, quotes, onQuote, onOrderRequest, onL
   const latestOrderPaid =
     latestOrder?.payment_status === "paid";
     
+  async function requestOrderChange(
+    orderId: string,
+    requestType:
+      | "cancellation"
+      | "reschedule",
+    requestedDate: string | null = null,
+    requestedTime: string | null = null,
+    reason: string | null = null
+  ) {
+    setRequestLoading(orderId);
+
+    try {
+      const {
+        error: requestError,
+      } = await supabase.rpc(
+        "request_order_change",
+        {
+          p_order_id: orderId,
+          p_request_type: requestType,
+          p_requested_date: requestedDate,
+          p_requested_time: requestedTime,
+          p_reason: reason,
+        }
+      );
+
+      if (requestError) {
+        console.error(
+          "Erro ao enviar solicitação:",
+          requestError
+        );
+
+        setCartToast(
+          requestError.message ||
+            "Não foi possível enviar a solicitação."
+        );
+
+        setTimeout(() => {
+          setCartToast("");
+        }, 3500);
+
+        return false;
+      }
+
+      await loadClientOrders();
+
+      setCartToast(
+        requestType === "cancellation"
+          ? "Solicitação de cancelamento enviada!"
+          : "Solicitação de reagendamento enviada!"
+      );
+
+      setTimeout(() => {
+        setCartToast("");
+      }, 2800);
+
+      return true;
+    } catch (error) {
+      console.error(
+        "Erro inesperado na solicitação:",
+        error
+      );
+
+      setCartToast(
+        "Ocorreu um erro ao enviar a solicitação."
+      );
+
+      setTimeout(() => {
+        setCartToast("");
+      }, 3500);
+
+      return false;
+    } finally {
+      setRequestLoading(null);
+    }
+  }
+
+  async function requestCancellation(
+    order: ClientOrderRow
+  ) {
+    const confirmed = window.confirm(
+      `Solicitar o cancelamento do pedido #${order.order_number}?`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    await requestOrderChange(
+      order.id,
+      "cancellation"
+    );
+  }
+
+  async function submitReschedule(
+    e: React.FormEvent<HTMLFormElement>
+  ) {
+    e.preventDefault();
+
+    if (!requestOrder) {
+      return;
+    }
+
+    const data = new FormData(
+      e.currentTarget
+    );
+
+    const success =
+      await requestOrderChange(
+        requestOrder,
+        "reschedule",
+        String(data.get("date") || ""),
+        String(data.get("time") || "") ||
+          null,
+        String(data.get("reason") || "") ||
+          null
+      );
+
+    if (success) {
+      setRequestOrder(null);
+    }
+  }
+
   return (
     <main className="client-portal">
       <header className="client-header">
@@ -2330,6 +2800,14 @@ function ClientPortal({ userName, products, quotes, onQuote, onOrderRequest, onL
                         : ""
                     }`;
 
+                  const hasPendingRequest =
+                    order.request_status === "pending";
+
+                  const canRequestChange =
+                    !["ready", "completed", "cancelled"].includes(
+                      order.status
+                    );
+
                   return (
                     <article key={order.id}>
                       <div className="product-mini">
@@ -2347,6 +2825,43 @@ function ClientPortal({ userName, products, quotes, onQuote, onOrderRequest, onL
                         <h3>{itemDescription}</h3>
 
                         <p>{deliveryDescription}</p>
+
+                        {hasPendingRequest && (
+                          <span className="request-badge">
+                            {order.request_type === "cancellation"
+                              ? "Cancelamento em análise"
+                              : "Reagendamento em análise"}
+                          </span>
+                        )}
+
+                        {canRequestChange &&
+                          !hasPendingRequest && (
+                            <div className="order-request-actions">
+                              <button
+                                disabled={
+                                  requestLoading === order.id
+                                }
+                                onClick={() =>
+                                  setRequestOrder(order.id)
+                                }
+                              >
+                                Reagendar
+                              </button>
+
+                              <button
+                                disabled={
+                                  requestLoading === order.id
+                                }
+                                onClick={() =>
+                                  requestCancellation(order)
+                                }
+                              >
+                                {requestLoading === order.id
+                                  ? "Enviando..."
+                                  : "Solicitar cancelamento"}
+                              </button>
+                            </div>
+                          )}
                       </div>
 
                       <div>
@@ -2396,15 +2911,100 @@ function ClientPortal({ userName, products, quotes, onQuote, onOrderRequest, onL
       </section>
       {cartOpen && <MiniCart items={cart} onClose={() => setCartOpen(false)} onQuantity={changeQuantity} onCheckout={() => { setCartOpen(false); setPaid(false); setSection("pagamento") }} onCatalog={() => { setCartOpen(false); setSection("catalogo") }} />}
       {requestOrder && (
-        <div className="modal-backdrop">
-          <form className="modal reschedule-modal" onSubmit={e => { e.preventDefault(); const data = new FormData(e.currentTarget); onOrderRequest(requestOrder, `Reagendamento solicitado para ${String(data.get("date"))} às ${String(data.get("time"))}`); setRequestOrder(null) }}>
-            <div className="modal-title"><div><p>REAGENDAMENTO</p><h2>Escolha uma nova data</h2></div><button type="button" onClick={() => setRequestOrder(null)}>×</button></div>
-            <div className="form-grid"><label>Nova data<input required name="date" type="date" /></label><label>Novo horário<input required name="time" type="time" /></label><label className="wide">Motivo<textarea name="reason" placeholder="Conte o motivo da alteração..." /></label></div>
-            <div className="modal-actions"><button type="button" className="secondary" onClick={() => setRequestOrder(null)}>Voltar</button><button className="primary">Enviar solicitação</button></div>
+        <div
+          className="modal-backdrop"
+          onMouseDown={e => {
+            if (e.currentTarget === e.target) {
+              setRequestOrder(null);
+            }
+          }}
+        >
+          <form
+            className="modal reschedule-modal"
+            onSubmit={submitReschedule}
+          >
+            <div className="modal-title">
+              <div>
+                <p>REAGENDAMENTO</p>
+                <h2>Escolha uma nova data</h2>
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setRequestOrder(null)
+                }
+                aria-label="Fechar"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="form-grid">
+              <label>
+                Nova data
+
+                <input
+                  required
+                  name="date"
+                  type="date"
+                />
+              </label>
+
+              <label>
+                Novo horário
+
+                <input
+                  required
+                  name="time"
+                  type="time"
+                />
+              </label>
+
+              <label className="wide">
+                Motivo
+
+                <textarea
+                  name="reason"
+                  placeholder="Conte o motivo da alteração..."
+                />
+              </label>
+            </div>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                disabled={
+                  requestLoading === requestOrder
+                }
+                onClick={() =>
+                  setRequestOrder(null)
+                }
+              >
+                Voltar
+              </button>
+
+              <button
+                className="primary"
+                disabled={
+                  requestLoading === requestOrder
+                }
+              >
+                {requestLoading === requestOrder
+                  ? "Enviando..."
+                  : "Enviar solicitação"}
+              </button>
+            </div>
           </form>
         </div>
       )}
-      {cartToast && <div className="toast">✓ {cartToast}</div>}
+
+      {cartToast && (
+        <div className="toast">
+          ✓ {cartToast}
+        </div>
+      )}
     </main>
   );
 }
@@ -2760,7 +3360,7 @@ function OrderTable({ orders }: { orders: any[] }) {
   );
 }
 
-function Orders({ orders, openModal, onStatus }: { orders: any[]; openModal: () => void; onStatus: (id: string, status: string) => void }) {
+function Orders({  orders,  openModal,  onStatus,  updatingOrderId,  onResolveRequest,  resolvingRequestId,}: {  orders: AppOrder[];  openModal: () => void;  onStatus: (    databaseId: string,    status: string  ) => Promise<void>;  updatingOrderId: string | null;  onResolveRequest: (    order: AppOrder,    decision: "approved" | "rejected"  ) => Promise<void>;  resolvingRequestId: string | null;}) {
   return (
     <div className="content">
       <div className="page-actions">
@@ -2776,7 +3376,58 @@ function Orders({ orders, openModal, onStatus }: { orders: any[]; openModal: () 
               <div><small>Pedido</small><b>{o.item}</b>{o.request && <span className="request-badge">{o.request}</span>}</div>
               <div><small>Entrega</small><b>{o.date}, {o.time}</b></div>
               <div><small>Valor</small><b>{o.value}</b></div>
-              <label><small>Atualizar status</small><select value={o.status} onChange={e => onStatus(o.id, e.target.value)}><option>Aguardando</option><option>Confirmado</option><option>Em produção</option><option>Pronto</option><option>Entregue</option><option>Cancelado</option></select>{o.request && <button className="approve-request" onClick={() => onStatus(o.id, o.request.includes("Cancelamento") ? "Cancelado" : "Confirmado")}>Aprovar solicitação</button>}</label>
+              <select
+                value={o.status}
+                disabled={
+                  updatingOrderId === o.databaseId ||
+                  resolvingRequestId === o.databaseId
+                }
+                onChange={e =>
+                  onStatus(
+                    o.databaseId,
+                    e.target.value
+                  )
+                }
+              >
+                <option>Aguardando</option>
+                <option>Confirmado</option>
+                <option>Aguardando pagamento</option>
+                <option>Em produção</option>
+                <option>Pronto</option>
+                <option>Entregue</option>
+                <option>Cancelado</option>
+              </select>
+              {o.request && (
+                <div className="request-actions">
+                  <button
+                    className="approve-request"
+                    disabled={
+                      resolvingRequestId ===
+                      o.databaseId
+                    }
+                    onClick={() =>
+                      onResolveRequest(o, "approved")
+                    }
+                  >
+                    {resolvingRequestId === o.databaseId
+                      ? "Processando..."
+                      : "Aprovar"}
+                  </button>
+
+                  <button
+                    className="secondary"
+                    disabled={
+                      resolvingRequestId ===
+                      o.databaseId
+                    }
+                    onClick={() =>
+                      onResolveRequest(o, "rejected")
+                    }
+                  >
+                    Rejeitar
+                  </button>
+                </div>
+              )}
             </article>
           ))}
         </div>
@@ -2785,24 +3436,70 @@ function Orders({ orders, openModal, onStatus }: { orders: any[]; openModal: () 
   );
 }
 
-function Production() {
-  const stages = [["Aguardando", 3], ["Em preparo", 4], ["Finalização", 2], ["Pronto", 5]];
+function Production({
+  orders,
+}: {
+  orders: AppOrder[];
+}) {
+  const stages = [
+    "Aguardando",
+    "Confirmado",
+    "Em produção",
+    "Pronto",
+  ];
+
   return (
     <div className="content">
       <div className="kanban">
-        {stages.map(([stage, count], i) => (
-          <section className="kanban-col" key={stage}>
-            <header><h3>{stage}</h3><b>{count}</b></header>
-            {orders.slice(i, i + 3).map(o => (
-              <article className="task" key={o.id}>
-                <small>{o.id} • {o.time}</small>
-                <h4>{o.item}</h4>
-                <p>{o.client}</p>
-                <div><Status>{i === 3 ? "Pronto" : i === 0 ? "Aguardando" : "Em produção"}</Status><span className="initials">{o.initials}</span></div>
-              </article>
-            ))}
-          </section>
-        ))}
+        {stages.map(stage => {
+          const stageOrders = orders.filter(
+            order => order.status === stage
+          );
+
+          return (
+            <section
+              className="kanban-col"
+              key={stage}
+            >
+              <header>
+                <h3>{stage}</h3>
+                <b>{stageOrders.length}</b>
+              </header>
+
+              {stageOrders.length === 0 && (
+                <div className="empty-cart">
+                  <small>
+                    Nenhum pedido nesta etapa
+                  </small>
+                </div>
+              )}
+
+              {stageOrders.map(order => (
+                <article
+                  className="task"
+                  key={order.databaseId}
+                >
+                  <small>
+                    {order.id} • {order.time}
+                  </small>
+
+                  <h4>{order.item}</h4>
+                  <p>{order.client}</p>
+
+                  <div>
+                    <Status>
+                      {order.status}
+                    </Status>
+
+                    <span className="initials">
+                      {order.initials}
+                    </span>
+                  </div>
+                </article>
+              ))}
+            </section>
+          );
+        })}
       </div>
     </div>
   );
@@ -4003,20 +4700,97 @@ function ClientCatalog({ products, onChoose, onAdd }: { products: Product[]; onC
   );
 }
 
-function Clients() {
+function Clients({
+  orders,
+}: {
+  orders: AppOrder[];
+}) {
+  const clientMap = new Map<
+    string,
+    {
+      name: string;
+      initials: string;
+      orders: number;
+      spent: number;
+    }
+  >();
+
+  orders.forEach(order => {
+    const existingClient =
+      clientMap.get(order.client);
+
+    const orderValue =
+      databasePrice(order.value);
+
+    if (existingClient) {
+      existingClient.orders += 1;
+      existingClient.spent += orderValue;
+      return;
+    }
+
+    clientMap.set(order.client, {
+      name: order.client,
+      initials: order.initials,
+      orders: 1,
+      spent: orderValue,
+    });
+  });
+
+  const clientList = Array.from(
+    clientMap.values()
+  );
+
   return (
     <div className="content">
       <section className="panel full-table">
-        <PanelHead icon="♙" title="Clientes" subtitle="Sua base de clientes" action="+ Novo cliente" />
-        <div className="client-grid">
-          {clients.map(c => (
-            <article className="client" key={c.name}>
-              <span className="initials large">{c.initials}</span>
-              <div><h3>{c.name}</h3><p>{c.email}</p></div>
-              <dl><div><dt>Pedidos</dt><dd>{c.orders}</dd></div><div><dt>Total gasto</dt><dd>{c.spent}</dd></div></dl>
-            </article>
-          ))}
-        </div>
+        <PanelHead
+          icon="♙"
+          title="Clientes"
+          subtitle="Sua base de clientes"
+        />
+
+        {clientList.length === 0 ? (
+          <div className="empty-cart">
+            <span>♙</span>
+            <h3>Nenhum cliente encontrado</h3>
+            <p>
+              Os clientes aparecerão depois que
+              realizarem pedidos.
+            </p>
+          </div>
+        ) : (
+          <div className="client-grid">
+            {clientList.map(client => (
+              <article
+                className="client"
+                key={client.name}
+              >
+                <span className="initials large">
+                  {client.initials}
+                </span>
+
+                <div>
+                  <h3>{client.name}</h3>
+                  <p>Cliente cadastrado</p>
+                </div>
+
+                <dl>
+                  <div>
+                    <dt>Pedidos</dt>
+                    <dd>{client.orders}</dd>
+                  </div>
+
+                  <div>
+                    <dt>Total gasto</dt>
+                    <dd>
+                      {money(client.spent)}
+                    </dd>
+                  </div>
+                </dl>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );
