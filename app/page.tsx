@@ -133,7 +133,40 @@ type OrderCreationResult =
 
 type CartItem = { product: Product; quantity: number };
 
-type Quote = { id: string; client: string; item: string; details: string; value: string; status: string; date: string };
+type QuoteRow = {
+  id: string;
+  quote_number: number | string;
+  customer_name: string;
+  title: string;
+  details: string;
+  desired_date: string | null;
+  desired_time: string | null;
+  quoted_amount: number | string | null;
+  admin_message: string | null;
+  reference_image_url: string | null;
+  status: string;
+  created_at: string;
+};
+
+type Quote = {
+  databaseId: string;
+  id: string;
+  client: string;
+  item: string;
+  details: string;
+  value: string;
+  status: string;
+  statusCode: string;
+  date: string;
+  time: string;
+  adminMessage: string;
+
+  // Caminho privado salvo no banco
+  imagePath: string;
+
+  // URL temporária usada para exibir a imagem
+  image: string;
+};
 
 function priceNumber(price: string) { return Number(price.replace(/[^\d,]/g, "").replace(",", ".")) || 0 }
 
@@ -345,6 +378,53 @@ function mapAdminOrder(
   };
 }
 
+function quoteStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    pending: "Em análise",
+    in_review: "Em análise",
+    awaiting_customer:
+      "Aguardando cliente",
+    approved: "Aprovado",
+    rejected: "Recusado",
+    cancelled: "Cancelado",
+  };
+
+  return labels[status] || status;
+}
+
+function mapQuote(row: QuoteRow): Quote {
+  return {
+    databaseId: row.id,
+    id: `ORC-${row.quote_number}`,
+    client: row.customer_name,
+    item: row.title,
+    details: row.details,
+    value:
+      row.quoted_amount === null
+        ? "A definir"
+        : money(
+            Number(row.quoted_amount)
+          ),
+    status: quoteStatusLabel(row.status),
+    statusCode: row.status,
+    date: row.desired_date
+      ? formatDeliveryDate(
+          row.desired_date
+        )
+      : "A combinar",
+    time: row.desired_time
+      ? row.desired_time.slice(0, 5)
+      : "A combinar",
+    adminMessage:
+      row.admin_message || "",
+
+    imagePath:
+      row.reference_image_url || "",
+
+    image: "",
+  };
+}
+
 const nav: { label: Screen; icon: string }[] = [
   { label: "Visão geral", icon: "⌂" },
   { label: "Pedidos", icon: "▢" },
@@ -358,11 +438,6 @@ const nav: { label: Screen; icon: string }[] = [
   { label: "Configurações", icon: "⚙" },
 ];
 
-
-const initialQuotes: Quote[] = [
-  { id: "ORC-204", client: "Ana Ribeiro", item: "Bolo de aniversário personalizado", details: "Tema floral, 40 pessoas, recheio de ninho com morango.", value: "R$ 420,00", status: "Aguardando cliente", date: "30 jul" },
-  { id: "ORC-205", client: "Carlos Mendes", item: "Mesa de doces", details: "200 doces variados e montagem no local.", value: "R$ 780,00", status: "Em análise", date: "02 ago" }
-];
 
 
 function Status({ children }: { children: string }) {
@@ -407,7 +482,12 @@ export default function Home() {
   ] = useState<string | null>(null);
 
   const [quotes, setQuotes] =
-    useState<Quote[]>(initialQuotes);
+    useState<Quote[]>([]);
+
+  const [
+    updatingQuoteId,
+    setUpdatingQuoteId,
+  ] = useState<string | null>(null);
 
   const [
     notificationsOpen,
@@ -658,6 +738,110 @@ export default function Home() {
     };
   }, [authLoading, role]);
 
+  useEffect(() => {
+    if (authLoading || !role) {
+      return;
+    }
+
+    let componentActive = true;
+
+    async function loadQuotes() {
+      const {
+        data,
+        error: quotesError,
+      } = await supabase
+        .from("quotes")
+        .select(`
+          id,
+          quote_number,
+          customer_name,
+          title,
+          details,
+          desired_date,
+          desired_time,
+          quoted_amount,
+          admin_message,
+          reference_image_url,
+          status,
+          created_at
+        `)
+        .order("created_at", {
+          ascending: false,
+        });
+
+      if (!componentActive) {
+        return;
+      }
+
+      if (quotesError) {
+        console.error(
+          "Erro ao carregar orçamentos:",
+          quotesError
+        );
+
+        setToast(
+          "Não foi possível carregar os orçamentos."
+        );
+
+        setTimeout(() => {
+          setToast("");
+        }, 2800);
+
+        return;
+      }
+
+      const quoteRows =
+        (data || []) as QuoteRow[];
+
+      const mappedQuotes = await Promise.all(
+        quoteRows.map(async row => {
+          const quote = mapQuote(row);
+
+          if (!quote.imagePath) {
+            return quote;
+          }
+
+          const {
+            data: signedUrlData,
+            error: signedUrlError,
+          } = await supabase.storage
+            .from("quote-images")
+            .createSignedUrl(
+              quote.imagePath,
+              60 * 60
+            );
+
+          if (signedUrlError) {
+            console.error(
+              `Erro ao carregar a imagem do orçamento ${quote.id}:`,
+              signedUrlError
+            );
+
+            return quote;
+          }
+
+          return {
+            ...quote,
+            image:
+              signedUrlData.signedUrl,
+          };
+        })
+      );
+
+      if (!componentActive) {
+        return;
+      }
+
+      setQuotes(mappedQuotes);
+    }
+
+    loadQuotes();
+
+    return () => {
+      componentActive = false;
+    };
+  }, [authLoading, role]);
+
   const filteredOrders = useMemo(
     () =>
       appOrders.filter(order =>
@@ -851,6 +1035,154 @@ export default function Home() {
     }
   }
 
+  async function handleAdminQuoteResponse(
+    quote: Quote,
+    value: string,
+    message: string
+  ) {
+    const amount = databasePrice(value);
+
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+      setToast(
+        "Informe um valor válido para o orçamento."
+      );
+
+      setTimeout(() => {
+        setToast("");
+      }, 2800);
+
+      return false;
+    }
+
+    setUpdatingQuoteId(quote.databaseId);
+
+    try {
+      const {
+        error: responseError,
+      } = await supabase.rpc(
+        "admin_respond_quote",
+        {
+          p_quote_id: quote.databaseId,
+          p_amount: amount,
+          p_message: message || null,
+        }
+      );
+
+      if (responseError) {
+        console.error(
+          "Erro ao responder orçamento:",
+          responseError
+        );
+
+        setToast(
+          "Não foi possível enviar o orçamento."
+        );
+
+        setTimeout(() => {
+          setToast("");
+        }, 2800);
+
+        return false;
+      }
+
+      setQuotes(currentQuotes =>
+        currentQuotes.map(currentQuote =>
+          currentQuote.databaseId ===
+          quote.databaseId
+            ? {
+                ...currentQuote,
+                value: money(amount),
+                status: "Aguardando cliente",
+                statusCode:
+                  "awaiting_customer",
+                adminMessage: message,
+              }
+            : currentQuote
+        )
+      );
+
+      setToast(
+        "Orçamento enviado ao cliente!"
+      );
+
+      setTimeout(() => {
+        setToast("");
+      }, 2200);
+
+      return true;
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao responder orçamento:",
+        error
+      );
+
+      setToast(
+        "Ocorreu um erro ao enviar o orçamento."
+      );
+
+      setTimeout(() => {
+        setToast("");
+      }, 2800);
+
+      return false;
+    } finally {
+      setUpdatingQuoteId(null);
+    }
+  }
+
+  async function handleClientQuoteResponse(
+    quoteId: string,
+    decision: "approved" | "rejected"
+  ) {
+    try {
+      const {
+        error: responseError,
+      } = await supabase.rpc(
+        "respond_to_quote",
+        {
+          p_quote_id: quoteId,
+          p_decision: decision,
+        }
+      );
+
+      if (responseError) {
+        console.error(
+          "Erro ao responder orçamento:",
+          responseError
+        );
+
+        return false;
+      }
+
+      setQuotes(currentQuotes =>
+        currentQuotes.map(quote =>
+          quote.databaseId === quoteId
+            ? {
+                ...quote,
+                status:
+                  decision === "approved"
+                    ? "Aprovado"
+                    : "Recusado",
+                statusCode: decision,
+              }
+            : quote
+        )
+      );
+
+      return true;
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao responder orçamento:",
+        error
+      );
+
+      return false;
+    }
+  }
+
   function saveOrder(
     e: React.FormEvent<HTMLFormElement>
   ) {
@@ -1012,23 +1344,7 @@ export default function Home() {
           product => !product.archived
         )}
         quotes={quotes}
-        onQuote={(id, status) => {
-          setQuotes(current =>
-            current.map(quote =>
-              quote.id === id
-                ? {
-                    ...quote,
-                    status,
-                  }
-                : quote
-            )
-          );
-
-          setNotifications(current => [
-            `Cliente respondeu ao orçamento ${id}`,
-            ...current,
-          ]);
-        }}
+        onQuote={handleClientQuoteResponse}
 
         onLogout={handleLogout}
       />
@@ -1198,24 +1514,8 @@ export default function Home() {
         {screen === "Orçamentos" && (
           <AdminQuotes
             quotes={quotes}
-            onUpdate={(id, value, status) => {
-              setQuotes(current =>
-                current.map(quote =>
-                  quote.id === id
-                    ? {
-                        ...quote,
-                        value,
-                        status,
-                      }
-                    : quote
-                )
-              );
-
-              setNotifications(current => [
-                `Orçamento ${id} atualizado`,
-                ...current,
-              ]);
-            }}
+            onUpdate={handleAdminQuoteResponse}
+            updatingQuoteId={updatingQuoteId}
           />
         )}
 
@@ -2282,7 +2582,7 @@ type ClientSection =
   | "avaliacao"
   | "perfil"
   ;
-function ClientPortal({ userName, products, quotes, onQuote, onLogout }: {  userName: string; products: Product[]; quotes: Quote[]; onQuote: (id: string, status: string) => void; onLogout: () => void }) {
+function ClientPortal({ userName, products, quotes, onQuote, onLogout }: {  userName: string; products: Product[]; quotes: Quote[]; onQuote: (  id: string,  decision: "approved" | "rejected") => Promise<boolean>; onLogout: () => void }) {
   const [section, setSection] =
   useState<ClientSection>("inicio");
   const [clientOrders, setClientOrders] =
@@ -2294,6 +2594,17 @@ function ClientPortal({ userName, products, quotes, onQuote, onLogout }: {  user
     sectionRestored,
     setSectionRestored,
   ] = useState(false);
+
+  const [quoteLoading, setQuoteLoading] =
+  useState(false);
+
+  const [quoteError, setQuoteError] =
+    useState("");
+
+  const [
+    createdQuoteNumber,
+    setCreatedQuoteNumber,
+  ] = useState<number | null>(null);
   const [sent, setSent] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [paid, setPaid] = useState(false);
@@ -2626,6 +2937,228 @@ function ClientPortal({ userName, products, quotes, onQuote, onLogout }: {  user
     }
   }
 
+  async function submitQuoteRequest(
+    e: React.FormEvent<HTMLFormElement>
+  ) {
+    e.preventDefault();
+
+    const form = e.currentTarget;
+    const data = new FormData(form);
+
+    const referenceImageValue =
+      data.get("referenceImage");
+
+    const referenceImage =
+      referenceImageValue instanceof File &&
+      referenceImageValue.size > 0
+        ? referenceImageValue
+        : null;
+
+    const productType = String(
+      data.get("productType") ||
+        "Pedido personalizado"
+    );
+
+    const people = String(
+      data.get("people") || ""
+    );
+
+    const baseDetails = String(
+      data.get("details") || ""
+    ).trim();
+
+    const customizationDetails =
+      selectedProduct?.options
+        .map(option => {
+          const value = String(
+            data.get(
+              `customization-${option}`
+            ) || ""
+          );
+
+          return value
+            ? `${option}: ${value}`
+            : "";
+        })
+        .filter(Boolean) || [];
+
+    const completeDetails = [
+      baseDetails,
+      people
+        ? `Quantidade de pessoas: ${people}`
+        : "",
+      ...customizationDetails,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    setQuoteError("");
+    setQuoteLoading(true);
+    setSent(false);
+
+    let uploadedImagePath: string | null =
+      null;
+
+    try {
+      if (referenceImage) {
+        const allowedTypes = [
+          "image/jpeg",
+          "image/png",
+          "image/webp",
+        ];
+
+        if (
+          !allowedTypes.includes(
+            referenceImage.type
+          )
+        ) {
+          setQuoteError(
+            "Envie uma imagem JPG, PNG ou WEBP."
+          );
+
+          return;
+        }
+
+        if (
+          referenceImage.size >
+          5 * 1024 * 1024
+        ) {
+          setQuoteError(
+            "A imagem deve possuir no máximo 5 MB."
+          );
+
+          return;
+        }
+
+        const {
+          data: userData,
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (
+          userError ||
+          !userData.user
+        ) {
+          console.error(
+            "Erro ao identificar usuário:",
+            userError
+          );
+
+          setQuoteError(
+            "Não foi possível identificar sua conta."
+          );
+
+          return;
+        }
+
+        const extension =
+          referenceImage.name
+            .split(".")
+            .pop()
+            ?.toLowerCase() || "jpg";
+
+        uploadedImagePath =
+          `${userData.user.id}/${crypto.randomUUID()}.${extension}`;
+
+        const {
+          error: uploadError,
+        } = await supabase.storage
+          .from("quote-images")
+          .upload(
+            uploadedImagePath,
+            referenceImage,
+            {
+              cacheControl: "3600",
+              upsert: false,
+              contentType: referenceImage.type,
+            }
+          );
+
+        if (uploadError) {
+          console.error(
+            "Erro ao enviar referência:",
+            uploadError
+          );
+
+          setQuoteError(
+            "Não foi possível enviar a imagem."
+          );
+
+          return;
+        }
+      }
+      const {
+        data: createdQuote,
+        error: quoteRequestError,
+      } = await supabase.rpc(
+        "create_quote_request",
+        {
+          p_title:
+            productType ||
+            "Pedido personalizado",
+          p_details: completeDetails,
+          p_desired_date:
+            String(data.get("date") || "") ||
+            null,
+          p_desired_time:
+            String(data.get("time") || "") ||
+            null,
+          p_reference_image_url:
+            uploadedImagePath,
+        }
+      );
+
+      if (quoteRequestError) {
+        console.error(
+          "Erro ao solicitar orçamento:",
+          quoteRequestError
+        );
+        
+        if (uploadedImagePath) {
+          await supabase.storage
+            .from("quote-images")
+            .remove([uploadedImagePath]);
+        }
+
+        setQuoteError(
+          quoteRequestError.message ||
+            "Não foi possível solicitar o orçamento."
+        );
+
+        return;
+      }
+
+      const result = createdQuote as {
+        quote_number: number | string;
+      };
+
+      setCreatedQuoteNumber(
+        Number(result.quote_number)
+      );
+
+      setSent(true);
+      setSelectedProduct(null);
+      form.reset();
+    } catch (error) {
+      console.error(
+        "Erro inesperado no orçamento:",
+        error
+      );
+
+      if (uploadedImagePath) {
+        await supabase.storage
+          .from("quote-images")
+          .remove([uploadedImagePath]);
+      }
+      
+      setQuoteError(
+        "Ocorreu um erro ao solicitar o orçamento."
+      );
+    } finally {
+      setQuoteLoading(false);
+    }
+  }
+
   return (
     <main className="client-portal">
       <header className="client-header">
@@ -2883,25 +3416,228 @@ function ClientPortal({ userName, products, quotes, onQuote, onLogout }: {  user
             </section>
           </>
         )}
-        {section === "orcamentos" && <ClientQuotes quotes={quotes.filter(q => q.client === userName)} onAnswer={onQuote} />}
+        {section === "orcamentos" && <ClientQuotes  quotes={quotes}  onAnswer={onQuote}/>}
         {section === "catalogo" && <ClientCatalog products={products.filter(p => p.active)} onChoose={p => { setSelectedProduct(p); setSection("novo") }} onAdd={addToCart} />}
-        {section === "novo" && <>
-          <div className="client-page-title"><p className="eyebrow">NOVA ENCOMENDA</p><h1>Conte seu desejo doce</h1><span>Personalize os detalhes e solicite seu orçamento.</span></div>
-          {selectedProduct && <div className="selected-product"><ProductVisual product={selectedProduct} /><div><small>PRODUTO SELECIONADO</small><b>{selectedProduct.name}</b><span>A partir de {selectedProduct.price}</span></div><button onClick={() => setSelectedProduct(null)}>Trocar</button></div>}
-          <form className="panel client-form" onSubmit={e => { e.preventDefault(); setSent(true) }}>
-            <div className="form-grid">
-              <label>Tipo de produto<select key={selectedProduct?.id || "custom"} defaultValue={selectedProduct?.name || ""}><option value="">Pedido personalizado</option>{products.filter(p => p.active).map(p => <option key={p.id}>{p.name}</option>)}</select></label>
-              <label>Quantidade de pessoas<input type="number" placeholder="Ex.: 30" /></label>
-              {selectedProduct?.customizable && selectedProduct.options.map(option => <label key={option}>{option}<select><option>Escolha uma opção</option><option>{option === "Tamanho" ? "Pequeno" : "Tradicional"}</option><option>{option === "Tamanho" ? "Médio" : "Especial"}</option><option>{option === "Tamanho" ? "Grande" : "Premium"}</option></select></label>)}
-              <label>Data desejada<input required type="date" /></label>
-              <label>Horário preferido<input required type="time" /></label>
-              <label className="wide">Tema, sabores e detalhes<textarea required placeholder="Conte como você imagina sua encomenda..." /></label>
-              <label className="wide">Imagem de referência<input type="file" accept="image/*" /></label>
+        {section === "novo" && (
+          <>
+            <div className="client-page-title">
+              <p className="eyebrow">
+                NOVA ENCOMENDA
+              </p>
+
+              <h1>Conte seu desejo doce</h1>
+
+              <span>
+                Personalize os detalhes e solicite seu
+                orçamento.
+              </span>
             </div>
-            <button className="primary">Solicitar orçamento</button>
-            {sent && <span className="form-success">✓ Solicitação enviada! Entraremos em contato em breve.</span>}
-          </form>
-        </>}
+
+            {selectedProduct && (
+              <div className="selected-product">
+                <ProductVisual
+                  product={selectedProduct}
+                />
+
+                <div>
+                  <small>PRODUTO SELECIONADO</small>
+                  <b>{selectedProduct.name}</b>
+
+                  <span>
+                    A partir de {selectedProduct.price}
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSelectedProduct(null)
+                  }
+                >
+                  Trocar
+                </button>
+              </div>
+            )}
+
+            <form
+              className="panel client-form"
+              onSubmit={submitQuoteRequest}
+            >
+              <div className="form-grid">
+                <label>
+                  Tipo de produto
+
+                  <select
+                    name="productType"
+                    value={
+                      selectedProduct?.name || ""
+                    }
+                    onChange={e => {
+                      const product =
+                        products.find(
+                          currentProduct =>
+                            currentProduct.name ===
+                            e.target.value
+                        ) || null;
+
+                      setSelectedProduct(product);
+                    }}
+                  >
+                    <option value="">
+                      Pedido personalizado
+                    </option>
+
+                    {products
+                      .filter(product => product.active)
+                      .map(product => (
+                        <option
+                          key={product.id}
+                          value={product.name}
+                        >
+                          {product.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+
+                <label>
+                  Quantidade de pessoas
+
+                  <input
+                    name="people"
+                    type="number"
+                    min="1"
+                    placeholder="Ex.: 30"
+                  />
+                </label>
+
+                {selectedProduct?.customizable &&
+                  selectedProduct.options.map(
+                    option => (
+                      <label key={option}>
+                        {option}
+
+                        <select
+                          required
+                          name={`customization-${option}`}
+                          defaultValue=""
+                        >
+                          <option
+                            value=""
+                            disabled
+                          >
+                            Escolha uma opção
+                          </option>
+
+                          <option
+                            value={
+                              option === "Tamanho"
+                                ? "Pequeno"
+                                : "Tradicional"
+                            }
+                          >
+                            {option === "Tamanho"
+                              ? "Pequeno"
+                              : "Tradicional"}
+                          </option>
+
+                          <option
+                            value={
+                              option === "Tamanho"
+                                ? "Médio"
+                                : "Especial"
+                            }
+                          >
+                            {option === "Tamanho"
+                              ? "Médio"
+                              : "Especial"}
+                          </option>
+
+                          <option
+                            value={
+                              option === "Tamanho"
+                                ? "Grande"
+                                : "Premium"
+                            }
+                          >
+                            {option === "Tamanho"
+                              ? "Grande"
+                              : "Premium"}
+                          </option>
+                        </select>
+                      </label>
+                    )
+                  )}
+
+                <label>
+                  Data desejada
+
+                  <input
+                    required
+                    name="date"
+                    type="date"
+                  />
+                </label>
+
+                <label>
+                  Horário preferido
+
+                  <input
+                    required
+                    name="time"
+                    type="time"
+                  />
+                </label>
+
+                <label className="wide">
+                  Tema, sabores e detalhes
+
+                  <textarea
+                    required
+                    name="details"
+                    placeholder="Conte como você imagina sua encomenda..."
+                  />
+                </label>
+
+                <label className="wide">
+                  Imagem de referência
+
+                  <input
+                    name="referenceImage"
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                  />
+
+                  <small>
+                    JPG, PNG ou WEBP — máximo de 5 MB.
+                  </small>
+                </label>
+              </div>
+
+              <button
+                className="primary"
+                disabled={quoteLoading}
+              >
+                {quoteLoading
+                  ? "Enviando solicitação..."
+                  : "Solicitar orçamento"}
+              </button>
+
+              {quoteError && (
+                <span className="form-error">
+                  {quoteError}
+                </span>
+              )}
+
+              {sent && (
+                <span className="form-success">
+                  ✓ Orçamento #{createdQuoteNumber} enviado!
+                  Entraremos em contato em breve.
+                </span>
+              )}
+            </form>
+          </>
+        )}
         {section === "pagamento" && <Payment  paid={paid}  cart={paid ? purchasedItems : cart}  onPay={createOrderFromCart}/>}
         {section === "avaliacao" && <Review reviewed={reviewed} stars={stars} setStars={setStars} onSubmit={() => setReviewed(true)} />}
         {section === "perfil" && <>
@@ -3196,28 +3932,243 @@ function Review({ reviewed, stars, setStars, onSubmit }: { reviewed: boolean; st
   );
 }
 
-function AdminQuotes({ quotes, onUpdate }: { quotes: Quote[]; onUpdate: (id: string, value: string, status: string) => void }) {
-  const [editing, setEditing] = useState<Quote | null>(null);
+function AdminQuotes({
+  quotes,
+  onUpdate,
+  updatingQuoteId,
+}: {
+  quotes: Quote[];
+  onUpdate: (
+    quote: Quote,
+    value: string,
+    message: string
+  ) => Promise<boolean>;
+  updatingQuoteId: string | null;
+}) {
+  const [editing, setEditing] =
+    useState<Quote | null>(null);
+
+  async function submitProposal(
+    e: React.FormEvent<HTMLFormElement>
+  ) {
+    e.preventDefault();
+
+    if (!editing) {
+      return;
+    }
+
+    const data = new FormData(
+      e.currentTarget
+    );
+
+    const success = await onUpdate(
+      editing,
+      String(data.get("value") || ""),
+      String(data.get("message") || "")
+    );
+
+    if (success) {
+      setEditing(null);
+    }
+  }
+
   return (
     <div className="content">
-      <div className="page-actions"><div><h2 className="section-title">Solicitações de orçamento</h2><p className="section-subtitle">Analise, defina o valor e envie a proposta ao cliente.</p></div></div>
-      <div className="quote-grid">
-        {quotes.map(q => (
-          <article className="panel quote-card" key={q.id}>
-            <div><span>{q.id}</span><Status>{q.status}</Status></div>
-            <small>{q.client} • Entrega {q.date}</small>
-            <h3>{q.item}</h3>
-            <p>{q.details}</p>
-            <footer><strong>{q.value}</strong><button onClick={() => setEditing(q)}>{q.status === "Em análise" ? "Montar proposta" : "Editar proposta"}</button></footer>
-          </article>
-        ))}
+      <div className="page-actions">
+        <div>
+          <h2 className="section-title">
+            Solicitações de orçamento
+          </h2>
+
+          <p className="section-subtitle">
+            Analise, defina o valor e envie a
+            proposta ao cliente.
+          </p>
+        </div>
       </div>
+
+      {quotes.length === 0 ? (
+        <div className="empty-cart">
+          <span>◇</span>
+          <h3>Nenhum orçamento recebido</h3>
+        </div>
+      ) : (
+        <div className="quote-grid">
+          {quotes.map(quote => (
+            <article
+              className="panel quote-card"
+              key={quote.databaseId}
+            >
+              <div>
+                <span>{quote.id}</span>
+                <Status>
+                  {quote.status}
+                </Status>
+              </div>
+
+              <small>
+                {quote.client} • Entrega{" "}
+                {quote.date} às {quote.time}
+              </small>
+
+              <h3>{quote.item}</h3>
+
+              <p
+                style={{
+                  whiteSpace: "pre-line",
+                }}
+              >
+                {quote.details}
+              </p>
+
+              {quote.image && (
+                <a
+                  className="quote-reference"
+                  href={quote.image}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <img
+                    src={quote.image}
+                    alt={`Imagem de referência do orçamento ${quote.id}`}
+                  />
+
+                  <div>
+                    <strong>Imagem de referência</strong>
+                    <span>Clique para visualizar</span>
+                  </div>
+                </a>
+              )}
+
+              {quote.adminMessage && (
+                <p>
+                  <strong>Mensagem:</strong>{" "}
+                  {quote.adminMessage}
+                </p>
+              )}
+
+              <footer>
+                <strong>{quote.value}</strong>
+
+                {![
+                  "approved",
+                  "rejected",
+                  "cancelled",
+                ].includes(
+                  quote.statusCode
+                ) && (
+                  <button
+                    disabled={
+                      updatingQuoteId ===
+                      quote.databaseId
+                    }
+                    onClick={() =>
+                      setEditing(quote)
+                    }
+                  >
+                    {quote.statusCode ===
+                    "awaiting_customer"
+                      ? "Editar proposta"
+                      : "Montar proposta"}
+                  </button>
+                )}
+              </footer>
+            </article>
+          ))}
+        </div>
+      )}
+
       {editing && (
-        <div className="modal-backdrop">
-          <form className="modal" onSubmit={e => { e.preventDefault(); const d = new FormData(e.currentTarget); onUpdate(editing.id, `R$ ${String(d.get("value")).replace("R$", "").trim()}`, "Aguardando cliente"); setEditing(null) }}>
-            <div className="modal-title"><div><p>{editing.id}</p><h2>Enviar proposta</h2></div><button type="button" onClick={() => setEditing(null)}>×</button></div>
-            <div className="form-grid"><label>Valor proposto<input name="value" required defaultValue={editing.value.replace("R$ ", "")} /></label><label>Validade<input type="date" required /></label><label className="wide">Mensagem ao cliente<textarea defaultValue="Inclui produção, acabamento e embalagem. Frete a combinar." /></label></div>
-            <div className="modal-actions"><button type="button" className="secondary" onClick={() => setEditing(null)}>Cancelar</button><button className="primary">Enviar orçamento</button></div>
+        <div
+          className="modal-backdrop"
+          onMouseDown={e => {
+            if (
+              e.currentTarget === e.target
+            ) {
+              setEditing(null);
+            }
+          }}
+        >
+          <form
+            className="modal"
+            onSubmit={submitProposal}
+          >
+            <div className="modal-title">
+              <div>
+                <p>{editing.id}</p>
+                <h2>Enviar proposta</h2>
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setEditing(null)
+                }
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="form-grid">
+              <label>
+                Valor proposto
+
+                <input
+                  required
+                  name="value"
+                  defaultValue={
+                    editing.value === "A definir"
+                      ? ""
+                      : editing.value.replace(
+                          "R$ ",
+                          ""
+                        )
+                  }
+                  placeholder="Ex.: 350,00"
+                />
+              </label>
+
+              <label className="wide">
+                Mensagem ao cliente
+
+                <textarea
+                  name="message"
+                  defaultValue={
+                    editing.adminMessage ||
+                    "Inclui produção, acabamento e embalagem. Frete a combinar."
+                  }
+                />
+              </label>
+            </div>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                disabled={
+                  updatingQuoteId ===
+                  editing.databaseId
+                }
+                onClick={() =>
+                  setEditing(null)
+                }
+              >
+                Cancelar
+              </button>
+
+              <button
+                className="primary"
+                disabled={
+                  updatingQuoteId ===
+                  editing.databaseId
+                }
+              >
+                {updatingQuoteId ===
+                editing.databaseId
+                  ? "Enviando proposta..."
+                  : "Enviar orçamento"}
+              </button>
+            </div>
           </form>
         </div>
       )}
@@ -3225,21 +4176,196 @@ function AdminQuotes({ quotes, onUpdate }: { quotes: Quote[]; onUpdate: (id: str
   );
 }
 
-function ClientQuotes({ quotes, onAnswer }: { quotes: Quote[]; onAnswer: (id: string, status: string) => void }) {
+function ClientQuotes({
+  quotes,
+  onAnswer,
+}: {
+  quotes: Quote[];
+  onAnswer: (
+    id: string,
+    decision: "approved" | "rejected"
+  ) => Promise<boolean>;
+}) {
+  const [
+    respondingQuoteId,
+    setRespondingQuoteId,
+  ] = useState<string | null>(null);
+
+  const [responseError, setResponseError] =
+    useState("");
+
+  async function answerQuote(
+    quote: Quote,
+    decision: "approved" | "rejected"
+  ) {
+    const action =
+      decision === "approved"
+        ? "aceitar"
+        : "recusar";
+
+    const confirmed = window.confirm(
+      `Deseja ${action} o orçamento ${quote.id}?`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setResponseError("");
+    setRespondingQuoteId(
+      quote.databaseId
+    );
+
+    const success = await onAnswer(
+      quote.databaseId,
+      decision
+    );
+
+    setRespondingQuoteId(null);
+
+    if (!success) {
+      setResponseError(
+        "Não foi possível responder ao orçamento."
+      );
+    }
+  }
+
   return (
     <>
-      <div className="client-page-title"><p className="eyebrow">PROPOSTAS</p><h1>Meus orçamentos</h1><span>Aceite ou recuse as propostas enviadas pela confeitaria.</span></div>
-      <div className="quote-grid client-quotes">
-        {quotes.map(q => (
-          <article className="panel quote-card" key={q.id}>
-            <div><span>{q.id}</span><Status>{q.status}</Status></div>
-            <small>Entrega prevista: {q.date}</small>
-            <h3>{q.item}</h3>
-            <p>{q.details}</p>
-            <footer><strong>{q.value}</strong>{q.status === "Aguardando cliente" ? <div><button className="secondary" onClick={() => onAnswer(q.id, "Recusado")}>Recusar</button><button onClick={() => onAnswer(q.id, "Aceito")}>Aceitar proposta</button></div> : <Status>{q.status}</Status>}</footer>
-          </article>
-        ))}
+      <div className="client-page-title">
+        <p className="eyebrow">PROPOSTAS</p>
+        <h1>Meus orçamentos</h1>
+
+        <span>
+          Aceite ou recuse as propostas enviadas
+          pela confeitaria.
+        </span>
       </div>
+
+      {responseError && (
+        <p className="form-error">
+          {responseError}
+        </p>
+      )}
+
+      {quotes.length === 0 ? (
+        <div className="empty-cart">
+          <span>◇</span>
+          <h3>Nenhum orçamento solicitado</h3>
+        </div>
+      ) : (
+        <div className="quote-grid client-quotes">
+          {quotes.map(quote => (
+            <article
+              className="panel quote-card"
+              key={quote.databaseId}
+            >
+              <div>
+                <span>{quote.id}</span>
+
+                <Status>
+                  {quote.status}
+                </Status>
+              </div>
+
+              <small>
+                Entrega prevista: {quote.date}
+                {quote.time !== "A combinar"
+                  ? ` às ${quote.time}`
+                  : ""}
+              </small>
+
+              <h3>{quote.item}</h3>
+
+              <p
+                style={{
+                  whiteSpace: "pre-line",
+                }}
+              >
+                {quote.details}
+              </p>
+
+              {quote.image && (
+                <a
+                  className="quote-reference"
+                  href={quote.image}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <img
+                    src={quote.image}
+                    alt={`Imagem de referência do orçamento ${quote.id}`}
+                  />
+
+                  <div>
+                    <strong>Imagem de referência</strong>
+                    <span>Clique para visualizar</span>
+                  </div>
+                </a>
+              )}
+
+              {quote.adminMessage && (
+                <p>
+                  <strong>
+                    Mensagem da confeitaria:
+                  </strong>{" "}
+                  {quote.adminMessage}
+                </p>
+              )}
+
+              <footer>
+                <strong>{quote.value}</strong>
+
+                {quote.statusCode ===
+                "awaiting_customer" ? (
+                  <div>
+                    <button
+                      className="secondary"
+                      disabled={
+                        respondingQuoteId ===
+                        quote.databaseId
+                      }
+                      onClick={() =>
+                        answerQuote(
+                          quote,
+                          "rejected"
+                        )
+                      }
+                    >
+                      {respondingQuoteId ===
+                      quote.databaseId
+                        ? "Processando..."
+                        : "Recusar"}
+                    </button>
+
+                    <button
+                      disabled={
+                        respondingQuoteId ===
+                        quote.databaseId
+                      }
+                      onClick={() =>
+                        answerQuote(
+                          quote,
+                          "approved"
+                        )
+                      }
+                    >
+                      {respondingQuoteId ===
+                      quote.databaseId
+                        ? "Processando..."
+                        : "Aceitar proposta"}
+                    </button>
+                  </div>
+                ) : (
+                  <Status>
+                    {quote.status}
+                  </Status>
+                )}
+              </footer>
+            </article>
+          ))}
+        </div>
+      )}
     </>
   );
 }
