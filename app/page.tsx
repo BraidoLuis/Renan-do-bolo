@@ -9,10 +9,22 @@ type Role = "admin" | "client";
 
 type ClientOrderItemRow = {
   id: string;
+  product_id: string | null;
   product_name: string;
   unit_price: number | string;
   quantity: number;
   customization: Record<string, string>;
+
+  products: {
+    image_url: string | null;
+  }[];
+};
+
+type ClientReviewRow = {
+  id: string;
+  rating: number;
+  comment: string;
+  created_at: string;
 };
 
 type ClientOrderRow = {
@@ -30,6 +42,7 @@ type ClientOrderRow = {
   request_reason: string | null;
   created_at: string;
   order_items: ClientOrderItemRow[];
+  reviews: ClientReviewRow[];
 };
 
 type UserProfile = {
@@ -174,6 +187,15 @@ type AppNotification = {
   relatedEntityType: string | null;
   relatedEntityId: string | null;
   isRead: boolean;
+  createdAt: string;
+};
+
+type AppReview = {
+  id: string;
+  orderId: string;
+  userId: string;
+  rating: number;
+  comment: string;
   createdAt: string;
 };
 
@@ -511,6 +533,11 @@ export default function Home() {
     setNotificationsLoading,
   ] = useState(false);
 
+  const [reviews, setReviews] =
+    useState<AppReview[]>([]);
+
+  const [reviewsLoading, setReviewsLoading] =
+    useState(false);
   /*
    * Recupera a sessão do Supabase quando
    * o usuário atualiza ou reabre a página.
@@ -1024,6 +1051,78 @@ export default function Home() {
       supabase.removeChannel(channel);
     };
   }, [authLoading, role]);
+
+  useEffect(() => {
+    if (
+      authLoading ||
+      role !== "admin" ||
+      screen !== "Relatórios"
+    ) {
+      return;
+    }
+
+    let componentActive = true;
+
+    async function loadReviews() {
+      setReviewsLoading(true);
+
+      const {
+        data,
+        error: reviewsError,
+      } = await supabase
+        .from("reviews")
+        .select(`
+          id,
+          order_id,
+          user_id,
+          rating,
+          comment,
+          created_at
+        `)
+        .order("created_at", {
+          ascending: false,
+        });
+
+      if (!componentActive) {
+        return;
+      }
+
+      if (reviewsError) {
+        console.error(
+          "Erro ao carregar avaliações:",
+          reviewsError
+        );
+
+        setReviews([]);
+        setReviewsLoading(false);
+        return;
+      }
+
+      const mappedReviews: AppReview[] =
+        (data || []).map(review => ({
+          id: review.id,
+          orderId: review.order_id,
+          userId: review.user_id,
+          rating: review.rating,
+          comment: review.comment,
+          createdAt: review.created_at,
+        }));
+
+      setReviews(mappedReviews);
+      setReviewsLoading(false);
+    }
+
+    loadReviews();
+
+    return () => {
+      componentActive = false;
+    };
+  }, [
+    authLoading,
+    role,
+    screen,
+    notifications.length,
+  ]);
 
   const filteredOrders = useMemo(
     () =>
@@ -1804,7 +1903,11 @@ export default function Home() {
         )}
 
         {screen === "Relatórios" && (
-          <Reports />
+          <Reports
+            reviews={reviews}
+            orders={appOrders}
+            loading={reviewsLoading}
+          />
         )}
 
         {screen === "Configurações" && (
@@ -2858,8 +2961,17 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
   const [sent, setSent] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [paid, setPaid] = useState(false);
-  const [reviewed, setReviewed] = useState(false);
-  const [stars, setStars] = useState(0);
+  const [reviewed, setReviewed] =
+    useState(false);
+
+  const [stars, setStars] =
+    useState(0);
+
+  const [reviewLoading, setReviewLoading] =
+    useState(false);
+
+  const [reviewError, setReviewError] =
+    useState("");
   const [cart, setCart] = useState<CartItem[]>([]);
   const [purchasedItems, setPurchasedItems] = useState<CartItem[]>([]);
   const [cartOpen, setCartOpen] = useState(false);
@@ -2936,10 +3048,20 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
           created_at,
           order_items (
             id,
+            product_id,
             product_name,
             unit_price,
             quantity,
-            customization
+            customization,
+            products (
+              image_url
+            )
+          ),
+          reviews (
+            id,
+            rating,
+            comment,
+            created_at
           )
         `)
         .order("created_at", {
@@ -2955,9 +3077,27 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
         return;
       }
 
-      setClientOrders(
-        (data || []) as ClientOrderRow[]
+    const normalizedOrders =
+      ((data || []) as ClientOrderRow[]).map(
+        order => ({
+          ...order,
+
+          order_items:
+            (order.order_items || []).map(
+              item => ({
+                ...item,
+                products:
+                  item.products || [],
+              })
+            ),
+
+          reviews:
+            order.reviews || [],
+        })
       );
+
+    setClientOrders(normalizedOrders);
+
     } catch (error) {
       console.error(
         "Erro inesperado ao carregar pedidos:",
@@ -2971,6 +3111,12 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
   useEffect(() => {
     loadClientOrders();
   }, []);
+
+  useEffect(() => {
+    if (section === "avaliacao") {
+      loadClientOrders();
+    }
+  }, [section]);
 
   async function createOrderFromCart():
     Promise<OrderCreationResult> {
@@ -3064,6 +3210,13 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
 
   const latestOrderPaid =
     latestOrder?.payment_status === "paid";
+
+  const reviewableOrders =
+    clientOrders.filter(
+      order =>
+        order.status === "completed" &&
+        (order.reviews?.length || 0) === 0
+    );
     
   async function requestOrderChange(
     orderId: string,
@@ -3406,6 +3559,75 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
       );
     } finally {
       setQuoteLoading(false);
+    }
+  }
+
+  async function submitOrderReview(
+    orderId: string,
+    comment: string
+  ): Promise<boolean> {
+    if (stars < 1 || stars > 5) {
+      setReviewError(
+        "Selecione uma nota entre 1 e 5 estrelas."
+      );
+
+      return false;
+    }
+
+    if (!comment.trim()) {
+      setReviewError(
+        "Escreva um comentário sobre o pedido."
+      );
+
+      return false;
+    }
+
+    setReviewLoading(true);
+    setReviewError("");
+
+    try {
+      const {
+        error: reviewRequestError,
+      } = await supabase.rpc(
+        "submit_order_review",
+        {
+          p_order_id: orderId,
+          p_rating: stars,
+          p_comment: comment.trim(),
+        }
+      );
+
+      if (reviewRequestError) {
+        console.error(
+          "Erro ao enviar avaliação:",
+          reviewRequestError
+        );
+
+        setReviewError(
+          reviewRequestError.message ||
+            "Não foi possível enviar a avaliação."
+        );
+
+        return false;
+      }
+
+      await loadClientOrders();
+
+      setReviewed(true);
+      return true;
+    } catch (error) {
+      console.error(
+        "Erro inesperado ao enviar avaliação:",
+        error
+      );
+
+      setReviewError(
+        "Ocorreu um erro ao enviar a avaliação."
+      );
+
+      return false;
+    } finally {
+      setReviewLoading(false);
     }
   }
 
@@ -3905,7 +4127,18 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
           </>
         )}
         {section === "pagamento" && <Payment  paid={paid}  cart={paid ? purchasedItems : cart}  onPay={createOrderFromCart}/>}
-        {section === "avaliacao" && <Review reviewed={reviewed} stars={stars} setStars={setStars} onSubmit={() => setReviewed(true)} />}
+        {section === "avaliacao" && (
+          <Review
+            orders={reviewableOrders}
+            products={products}
+            reviewed={reviewed}
+            stars={stars}
+            setStars={setStars}
+            loading={reviewLoading}
+            error={reviewError}
+            onSubmit={submitOrderReview}
+          />
+        )}
         {section === "perfil" && <>
           <div className="client-page-title"><p className="eyebrow">MINHA CONTA</p><h1>Dados pessoais</h1></div>
           <section className="panel settings"><div className="form-grid"><label>Nome<input defaultValue={userName} /></label><label>Telefone<input defaultValue="(22) 99987-6543" /></label><label>E-mail<input defaultValue="ana.ribeiro@email.com" /></label><label>Data de nascimento<input type="date" defaultValue="1994-05-18" /></label><label className="wide">Endereço<input defaultValue="Rua das Acácias, 85 — Centro" /></label></div><button className="primary">Salvar alterações</button></section>
@@ -4183,16 +4416,248 @@ function Payment({  paid,  cart,  onPay,}: {  paid: boolean;  cart: CartItem[]; 
   );
 }
 
-function Review({ reviewed, stars, setStars, onSubmit }: { reviewed: boolean; stars: number; setStars: (n: number) => void; onSubmit: () => void }) {
-  if (reviewed) return <div className="success-state review-success"><span>★</span><h1>Obrigado pela avaliação!</h1><p>Sua opinião ajuda a confeitaria a tornar cada experiência ainda mais especial.</p></div>;
+function Review({
+  orders,
+  products,
+  reviewed,
+  stars,
+  setStars,
+  loading,
+  error,
+  onSubmit,
+}: {
+  orders: ClientOrderRow[];
+  products: Product[];
+  reviewed: boolean;
+  stars: number;
+  setStars: (rating: number) => void;
+  loading: boolean;
+  error: string;
+
+  onSubmit: (
+    orderId: string,
+    comment: string
+  ) => Promise<boolean>;
+}) {
+  const [
+    selectedOrderId,
+    setSelectedOrderId,
+  ] = useState("");
+
+  const selectedOrder =
+    orders.find(
+      order => order.id === selectedOrderId
+    ) ||
+    orders[0] ||
+    null;
+
+  if (reviewed) {
+    return (
+      <div className="success-state review-success">
+        <span>★</span>
+
+        <h1>Obrigado pela avaliação!</h1>
+
+        <p>
+          Sua opinião ajuda a confeitaria a tornar
+          cada experiência ainda mais especial.
+        </p>
+      </div>
+    );
+  }
+
+  if (orders.length === 0) {
+    return (
+      <>
+        <div className="client-page-title">
+          <p className="eyebrow">AVALIAÇÃO</p>
+          <h1>Como foi sua experiência?</h1>
+
+          <span>
+            Avalie um pedido já concluído.
+          </span>
+        </div>
+
+        <div className="empty-cart">
+          <span>★</span>
+          <h3>Nenhum pedido para avaliar</h3>
+
+          <p>
+            Quando um pedido for marcado como
+            entregue, ele ficará disponível aqui.
+          </p>
+        </div>
+      </>
+    );
+  }
+
+  const orderDescription =
+    selectedOrder?.order_items
+      .map(
+        item =>
+          `${item.quantity}× ${item.product_name}`
+      )
+      .join(", ") || "Pedido";
+
+  const reviewProductImage =
+    selectedOrder?.order_items
+      .map(item => {
+        const matchingProduct =
+          products.find(
+            product =>
+              String(product.id) ===
+                String(item.product_id) ||
+              product.name ===
+                item.product_name
+          );
+
+        return (
+          matchingProduct?.image ||
+          item.products?.[0]?.image_url ||
+          ""
+        );
+      })
+      .find(image => Boolean(image)) || "";
+
+  async function submit(
+    event: React.FormEvent<HTMLFormElement>
+  ) {
+    event.preventDefault();
+
+    if (!selectedOrder) {
+      return;
+    }
+
+    const data = new FormData(
+      event.currentTarget
+    );
+
+    await onSubmit(
+      selectedOrder.id,
+      String(data.get("comment") || "")
+    );
+  }
+
   return (
     <>
-      <div className="client-page-title"><p className="eyebrow">AVALIAÇÃO</p><h1>Como foi sua experiência?</h1><span>Avalie um pedido já concluído.</span></div>
-      <form className="panel review-card" onSubmit={e => { e.preventDefault(); onSubmit() }}>
-        <div className="review-product"><span>🥧</span><div><small>PEDIDO #1032</small><h2>Torta de Limão</h2><p>Entregue em 12 de junho de 2026</p></div></div>
-        <label>Sua nota<div className="stars">{[1, 2, 3, 4, 5].map(n => <button type="button" key={n} className={n <= stars ? "selected" : ""} onClick={() => setStars(n)} aria-label={`${n} estrelas`}>★</button>)}</div></label>
-        <label>Conte como foi<textarea required placeholder="Sabor, apresentação, atendimento..." /></label>
-        <button className="primary" disabled={!stars}>Enviar avaliação</button>
+      <div className="client-page-title">
+        <p className="eyebrow">AVALIAÇÃO</p>
+        <h1>Como foi sua experiência?</h1>
+
+        <span>
+          Avalie um pedido já concluído.
+        </span>
+      </div>
+
+      <form
+        className="panel review-card"
+        onSubmit={submit}
+      >
+        {orders.length > 1 && (
+          <label>
+            Escolha o pedido
+
+            <select
+              value={
+                selectedOrder?.id || ""
+              }
+              onChange={event => {
+                setSelectedOrderId(
+                  event.target.value
+                );
+
+                setStars(0);
+              }}
+            >
+              {orders.map(order => (
+                <option
+                  key={order.id}
+                  value={order.id}
+                >
+                  Pedido #{order.order_number}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {selectedOrder && (
+          <div className="review-product">
+            {reviewProductImage ? (
+              <img
+                src={reviewProductImage}
+                alt={orderDescription}
+              />
+            ) : (
+              <span>🥧</span>
+            )}
+
+            <div>
+              <small>
+                PEDIDO #{selectedOrder.order_number}
+              </small>
+
+              <h2>{orderDescription}</h2>
+
+              <p>
+                Entregue em{" "}
+                {formatDeliveryDate(
+                  selectedOrder.delivery_date
+                )}
+              </p>
+            </div>
+          </div>
+        )}
+
+        <label>
+          Sua nota
+
+          <div className="stars">
+            {[1, 2, 3, 4, 5].map(rating => (
+              <button
+                type="button"
+                key={rating}
+                className={
+                  rating <= stars
+                    ? "selected"
+                    : ""
+                }
+                onClick={() =>
+                  setStars(rating)
+                }
+                aria-label={`${rating} estrelas`}
+              >
+                ★
+              </button>
+            ))}
+          </div>
+        </label>
+
+        <label>
+          Conte como foi
+
+          <textarea
+            required
+            maxLength={2000}
+            name="comment"
+            placeholder="Sabor, apresentação, atendimento..."
+          />
+        </label>
+
+        {error && (
+          <p className="form-error">
+            {error}
+          </p>
+        )}
+
+        <button
+          className="primary"
+          disabled={!stars || loading}
+        >
+          {loading
+            ? "Enviando avaliação..."
+            : "Enviar avaliação"}
+        </button>
       </form>
     </>
   );
@@ -4693,6 +5158,7 @@ function NotificationPanel({
       stock: "▦",
       payment: "$",
       account: "♙",
+      review: "★",
       general: "✓",
     };
 
@@ -6304,16 +6770,206 @@ function Finance() {
   );
 }
 
-function Reports() {
+function Reports({
+  reviews,
+  orders,
+  loading,
+}: {
+  reviews: AppReview[];
+  orders: AppOrder[];
+  loading: boolean;
+}) {
+  const averageRating =
+    reviews.length > 0
+      ? reviews.reduce(
+          (total, review) =>
+            total + review.rating,
+          0
+        ) / reviews.length
+      : 0;
+
+  function reviewDate(createdAt: string) {
+    return new Date(
+      createdAt
+    ).toLocaleDateString("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
+  }
+
   return (
     <div className="content">
+      <div className="kpis review-kpis">
+        <Kpi
+          icon="★"
+          label="Nota média"
+          value={
+            reviews.length > 0
+              ? averageRating.toFixed(1)
+              : "—"
+          }
+          note="De 5 estrelas"
+          tone="gold"
+        />
+
+        <Kpi
+          icon="◇"
+          label="Avaliações"
+          value={String(reviews.length)}
+          note="Pedidos avaliados"
+          tone="green"
+        />
+
+        <Kpi
+          icon="✓"
+          label="Satisfação"
+          value={
+            reviews.length > 0
+              ? `${Math.round(
+                  (reviews.filter(
+                    review =>
+                      review.rating >= 4
+                  ).length /
+                    reviews.length) *
+                    100
+                )}%`
+              : "—"
+          }
+          note="Notas entre 4 e 5"
+          tone="green"
+        />
+      </div>
+
+      <section className="panel reviews-panel">
+        <div className="panel-head">
+          <span>★</span>
+
+          <div>
+            <p className="eyebrow">
+              EXPERIÊNCIA DOS CLIENTES
+            </p>
+
+            <h2>Avaliações recebidas</h2>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="empty-notifications">
+            <span>◌</span>
+            <p>Carregando avaliações...</p>
+          </div>
+        ) : reviews.length === 0 ? (
+          <div className="empty-notifications">
+            <span>☆</span>
+            <p>Nenhuma avaliação recebida.</p>
+          </div>
+        ) : (
+          <div className="reviews-list">
+            {reviews.map(review => {
+              const relatedOrder =
+                orders.find(
+                  order =>
+                    order.databaseId ===
+                    review.orderId
+                );
+
+              return (
+                <article key={review.id}>
+                  <div className="review-avatar">
+                    {getInitials(
+                      relatedOrder?.client ||
+                        "Cliente"
+                    )}
+                  </div>
+
+                  <div className="review-content">
+                    <header>
+                      <div>
+                        <strong>
+                          {relatedOrder?.client ||
+                            "Cliente"}
+                        </strong>
+
+                        <small>
+                          {relatedOrder?.id ||
+                            "Pedido"}
+                          {relatedOrder?.item
+                            ? ` • ${relatedOrder.item}`
+                            : ""}
+                        </small>
+                      </div>
+
+                      <time>
+                        {reviewDate(
+                          review.createdAt
+                        )}
+                      </time>
+                    </header>
+
+                    <div
+                      className="review-rating"
+                      aria-label={`${review.rating} de 5 estrelas`}
+                    >
+                      {[1, 2, 3, 4, 5].map(
+                        star => (
+                          <span
+                            key={star}
+                            className={
+                              star <=
+                              review.rating
+                                ? "selected"
+                                : ""
+                            }
+                          >
+                            ★
+                          </span>
+                        )
+                      )}
+                    </div>
+
+                    <p>{review.comment}</p>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
       <div className="report-grid">
-        {[["Vendas por período", "Acompanhe faturamento, ticket médio e evolução."], ["Produtos mais vendidos", "Descubra os itens favoritos dos seus clientes."], ["Desempenho da produção", "Avalie prazos, volume e eficiência da equipe."], ["Clientes recorrentes", "Identifique fidelidade e oportunidades de contato."]].map(([t, p], i) => (
-          <article className="panel report" key={t}>
-            <span>{["▥", "♨", "◴", "♙"][i]}</span>
-            <h3>{t}</h3>
-            <p>{p}</p>
-            <button>Gerar relatório ›</button>
+        {[
+          [
+            "Vendas por período",
+            "Acompanhe faturamento, ticket médio e evolução.",
+          ],
+          [
+            "Produtos mais vendidos",
+            "Descubra os itens favoritos dos seus clientes.",
+          ],
+          [
+            "Desempenho da produção",
+            "Avalie prazos, volume e eficiência da equipe.",
+          ],
+          [
+            "Clientes recorrentes",
+            "Identifique fidelidade e oportunidades de contato.",
+          ],
+        ].map(([title, description], index) => (
+          <article
+            className="panel report"
+            key={title}
+          >
+            <span>
+              {["▥", "♨", "◴", "♙"][index]}
+            </span>
+
+            <h3>{title}</h3>
+            <p>{description}</p>
+
+            <button>
+              Gerar relatório ›
+            </button>
           </article>
         ))}
       </div>
