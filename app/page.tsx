@@ -3288,6 +3288,10 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
             "stripe-checkout-order-number"
           );
 
+          sessionStorage.removeItem(
+            "stripe-checkout-order-id"
+          );
+
           await loadClientOrders();
 
           setPaymentReturnLoading(false);
@@ -4552,7 +4556,29 @@ function Payment({
   ] = useState<{
     id: string;
     number: number;
-  } | null>(null);
+  } | null>(() => {
+    const savedOrderId =
+      sessionStorage.getItem(
+        "stripe-checkout-order-id"
+      );
+
+    const savedOrderNumber =
+      sessionStorage.getItem(
+        "stripe-checkout-order-number"
+      );
+
+    if (
+      !savedOrderId ||
+      !savedOrderNumber
+    ) {
+      return null;
+    }
+
+    return {
+      id: savedOrderId,
+      number: Number(savedOrderNumber),
+    };
+  });
 
   const [processing, setProcessing] =
   useState(false);
@@ -4662,6 +4688,11 @@ async function confirmOrder() {
     sessionStorage.setItem(
       "stripe-checkout-order-number",
       String(order.number)
+    );
+
+    sessionStorage.setItem(
+      "stripe-checkout-order-id",
+      order.id
     );
 
     window.location.assign(checkoutUrl);
