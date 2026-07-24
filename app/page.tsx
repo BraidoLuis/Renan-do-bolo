@@ -161,11 +161,20 @@ type Quote = {
   time: string;
   adminMessage: string;
 
-  // Caminho privado salvo no banco
   imagePath: string;
 
-  // URL temporária usada para exibir a imagem
   image: string;
+};
+
+type AppNotification = {
+  id: string;
+  title: string;
+  message: string;
+  type: string;
+  relatedEntityType: string | null;
+  relatedEntityId: string | null;
+  isRead: boolean;
+  createdAt: string;
 };
 
 function priceNumber(price: string) { return Number(price.replace(/[^\d,]/g, "").replace(",", ".")) || 0 }
@@ -495,11 +504,12 @@ export default function Home() {
   ] = useState(false);
 
   const [notifications, setNotifications] =
-    useState([
-      "Novo pedido de orçamento recebido",
-      "Estoque baixo: Torta de Limão",
-      "Ana solicitou reagendamento do pedido #1048",
-    ]);
+    useState<AppNotification[]>([]);
+
+  const [
+    notificationsLoading,
+    setNotificationsLoading,
+  ] = useState(false);
 
   /*
    * Recupera a sessão do Supabase quando
@@ -842,11 +852,184 @@ export default function Home() {
     };
   }, [authLoading, role]);
 
+  useEffect(() => {
+    if (authLoading || !role) {
+      setNotifications([]);
+      return;
+    }
+
+    let componentActive = true;
+
+    async function loadNotifications() {
+      setNotificationsLoading(true);
+
+      const {
+        data,
+        error: notificationsError,
+      } = await supabase
+        .from("notifications")
+        .select(`
+          id,
+          title,
+          message,
+          type,
+          related_entity_type,
+          related_entity_id,
+          is_read,
+          created_at
+        `)
+        .order("created_at", {
+          ascending: false,
+        })
+        .limit(30);
+
+      if (!componentActive) {
+        return;
+      }
+
+      if (notificationsError) {
+        console.error(
+          "Erro ao carregar notificações:",
+          notificationsError
+        );
+
+        setNotifications([]);
+        setNotificationsLoading(false);
+        return;
+      }
+
+      const mappedNotifications: AppNotification[] =
+        (data || []).map(notification => ({
+          id: notification.id,
+          title: notification.title,
+          message: notification.message,
+          type: notification.type,
+          relatedEntityType:
+            notification.related_entity_type,
+          relatedEntityId:
+            notification.related_entity_id,
+          isRead: notification.is_read,
+          createdAt: notification.created_at,
+        }));
+
+      setNotifications(mappedNotifications);
+      setNotificationsLoading(false);
+    }
+
+    loadNotifications();
+
+    return () => {
+      componentActive = false;
+    };
+  }, [authLoading, role]);
+
+  useEffect(() => {
+    if (authLoading || !role) {
+      return;
+    }
+
+    let componentActive = true;
+
+    const channel = supabase.channel(
+      `notifications-${crypto.randomUUID()}`
+    );
+
+    async function subscribeToNotifications() {
+      const {
+        data: userData,
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (
+        !componentActive ||
+        userError ||
+        !userData.user
+      ) {
+        if (userError) {
+          console.error(
+            "Erro ao identificar usuário das notificações:",
+            userError
+          );
+        }
+
+        return;
+      }
+
+      channel
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "notifications",
+            filter: `user_id=eq.${userData.user.id}`,
+          },
+          payload => {
+            const row = payload.new as {
+              id: string;
+              title: string;
+              message: string;
+              type: string;
+              related_entity_type: string | null;
+              related_entity_id: string | null;
+              is_read: boolean;
+              created_at: string;
+            };
+
+            const newNotification: AppNotification = {
+              id: row.id,
+              title: row.title,
+              message: row.message,
+              type: row.type,
+              relatedEntityType:
+                row.related_entity_type,
+              relatedEntityId:
+                row.related_entity_id,
+              isRead: row.is_read,
+              createdAt: row.created_at,
+            };
+
+            setNotifications(current => {
+              const notificationAlreadyExists =
+                current.some(
+                  notification =>
+                    notification.id ===
+                    newNotification.id
+                );
+
+              if (notificationAlreadyExists) {
+                return current;
+              }
+
+              return [
+                newNotification,
+                ...current,
+              ].slice(0, 30);
+            });
+          }
+        )
+        .subscribe(status => {
+          if (status === "CHANNEL_ERROR") {
+            console.error(
+              "Erro no canal de notificações em tempo real."
+            );
+          }
+        });
+    }
+
+    subscribeToNotifications();
+
+    return () => {
+      componentActive = false;
+      supabase.removeChannel(channel);
+    };
+  }, [authLoading, role]);
+
   const filteredOrders = useMemo(
     () =>
       appOrders.filter(order =>
         `${order.client} ${order.item} ${order.id}`
-          .toLowerCase()
+          .toLowerCase() 
           .includes(query.toLowerCase())
       ),
     [query, appOrders]
@@ -1294,6 +1477,44 @@ export default function Home() {
     }
   }
 
+  async function handleMarkNotificationsAsRead() {
+    const unreadIds = notifications
+      .filter(notification => !notification.isRead)
+      .map(notification => notification.id);
+
+    if (unreadIds.length === 0) {
+      return;
+    }
+
+    const { error: updateError } =
+      await supabase
+        .from("notifications")
+        .update({
+          is_read: true,
+        })
+        .in("id", unreadIds);
+
+    if (updateError) {
+      console.error(
+        "Erro ao marcar notificações como lidas:",
+        updateError
+      );
+
+      return;
+    }
+
+    setNotifications(current =>
+      current.map(notification => ({
+        ...notification,
+        isRead: true,
+      }))
+    );
+  }
+
+  const unreadNotificationsCount =
+  notifications.filter(
+    notification => !notification.isRead
+  ).length;
   /*
    * Enquanto o Supabase verifica a sessão,
    * não mostra o login nem os painéis.
@@ -1338,16 +1559,36 @@ export default function Home() {
    */
   if (role === "client") {
     return (
-      <ClientPortal
-        userName={profile?.full_name || "Cliente"}
-        products={products.filter(
-          product => !product.archived
-        )}
-        quotes={quotes}
-        onQuote={handleClientQuoteResponse}
+      <>
+        <ClientPortal
+          userName={
+            profile?.full_name || "Cliente"
+          }
+          products={products.filter(
+            product => !product.archived
+          )}
+          quotes={quotes}
+          onQuote={handleClientQuoteResponse}
+          unreadNotificationsCount={
+            unreadNotificationsCount
+          }
+          onOpenNotifications={() =>
+            setNotificationsOpen(true)
+          }
+          onLogout={handleLogout}
+        />
 
-        onLogout={handleLogout}
-      />
+        {notificationsOpen && (
+          <NotificationPanel
+            items={notifications}
+            loading={notificationsLoading}
+            onClose={() =>
+              setNotificationsOpen(false)
+            }
+            onRead={handleMarkNotificationsAsRead}
+          />
+        )}
+      </>
     );
   }
 
@@ -1460,14 +1701,22 @@ export default function Home() {
             </label>
 
             <button
+              type="button"
               className="bell"
-              aria-label="Notificações"
+              aria-label={`Abrir notificações. ${unreadNotificationsCount} não lidas`}
               onClick={() =>
                 setNotificationsOpen(value => !value)
               }
             >
-              ♧
-              <i />
+              <span>♧</span>
+
+              {unreadNotificationsCount > 0 && (
+                <b>
+                  {unreadNotificationsCount > 99
+                    ? "99+"
+                    : unreadNotificationsCount}
+                </b>
+              )}
             </button>
 
             <div className="avatar">
@@ -1566,10 +1815,11 @@ export default function Home() {
       {notificationsOpen && (
         <NotificationPanel
           items={notifications}
+          loading={notificationsLoading}
           onClose={() =>
             setNotificationsOpen(false)
           }
-          onRead={() => setNotifications([])}
+          onRead={handleMarkNotificationsAsRead}
         />
       )}
 
@@ -2582,7 +2832,7 @@ type ClientSection =
   | "avaliacao"
   | "perfil"
   ;
-function ClientPortal({ userName, products, quotes, onQuote, onLogout }: {  userName: string; products: Product[]; quotes: Quote[]; onQuote: (  id: string,  decision: "approved" | "rejected") => Promise<boolean>; onLogout: () => void }) {
+function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotificationsCount,  onOpenNotifications,  onLogout,}: {  userName: string;  products: Product[];  quotes: Quote[];  onQuote: (    id: string,    decision: "approved" | "rejected"  ) => Promise<boolean>;  unreadNotificationsCount: number;  onOpenNotifications: () => void;  onLogout: () => void;}) {
   const [section, setSection] =
   useState<ClientSection>("inicio");
   const [clientOrders, setClientOrders] =
@@ -3172,6 +3422,22 @@ function ClientPortal({ userName, products, quotes, onQuote, onLogout }: {  user
           <button className={section === "avaliacao" ? "active" : ""} onClick={() => setSection("avaliacao")}>Avaliar</button>
         </nav>
         <div className="client-account">
+          <button
+            type="button"
+            className="client-notification-button"
+            onClick={onOpenNotifications}
+            aria-label={`Abrir notificações. ${unreadNotificationsCount} não lidas`}
+          >
+            <span>♧</span>
+
+            {unreadNotificationsCount > 0 && (
+              <b>
+                {unreadNotificationsCount > 99
+                  ? "99+"
+                  : unreadNotificationsCount}
+              </b>
+            )}
+          </button>
           <button className="cart-trigger" onClick={() => setCartOpen(true)} aria-label={`Abrir carrinho com ${cartCount} itens`}><span>🛒</span><b>{cartCount}</b></button>
           <span className="initials">
             {getInitials(userName)}
@@ -4396,17 +4662,113 @@ function Inventory({  products,  onStock,}: {  products: Product[];  onStock: ( 
   );
 }
 
-function NotificationPanel({ items, onClose, onRead }: { items: string[]; onClose: () => void; onRead: () => void }) {
+function NotificationPanel({
+  items,
+  loading,
+  onClose,
+  onRead,
+}: {
+  items: AppNotification[];
+  loading: boolean;
+  onClose: () => void;
+  onRead: () => void;
+}) {
+  function notificationDate(
+    createdAt: string
+  ) {
+    const date = new Date(createdAt);
+
+    return date.toLocaleString("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  function notificationIcon(type: string) {
+    const icons: Record<string, string> = {
+      order: "▢",
+      quote: "◇",
+      stock: "▦",
+      payment: "$",
+      account: "♙",
+      general: "✓",
+    };
+
+    return icons[type] || "✓";
+  }
+
   return (
     <aside className="notification-panel">
-      <header><div><p className="eyebrow">ATUALIZAÇÕES</p><h2>Notificações</h2></div><button onClick={onClose}>×</button></header>
-      {items.length ? (
+      <header>
+        <div>
+          <p className="eyebrow">
+            ATUALIZAÇÕES
+          </p>
+
+          <h2>Notificações</h2>
+        </div>
+
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Fechar notificações"
+        >
+          ×
+        </button>
+      </header>
+
+      {loading ? (
+        <div className="empty-notifications">
+          <span>◌</span>
+          <p>Carregando notificações...</p>
+        </div>
+      ) : items.length > 0 ? (
         <>
-          <div>{items.map((item, i) => <article key={`${item}-${i}`}><span>{i === 1 ? "!" : "✓"}</span><div><b>{item}</b><small>Agora mesmo</small></div></article>)}</div>
-          <button className="read-all" onClick={onRead}>Marcar todas como lidas</button>
+          <div>
+            {items.map(item => (
+              <article
+                key={item.id}
+                className={
+                  item.isRead
+                    ? "notification-read"
+                    : "notification-unread"
+                }
+              >
+                <span>
+                  {notificationIcon(item.type)}
+                </span>
+
+                <div>
+                  <b>{item.title}</b>
+                  <p>{item.message}</p>
+
+                  <small>
+                    {notificationDate(
+                      item.createdAt
+                    )}
+                  </small>
+                </div>
+              </article>
+            ))}
+          </div>
+
+          {items.some(item => !item.isRead) && (
+            <button
+              type="button"
+              className="read-all"
+              onClick={onRead}
+            >
+              Marcar todas como lidas
+            </button>
+          )}
         </>
       ) : (
-        <div className="empty-notifications"><span>✓</span><p>Tudo em dia por aqui.</p></div>
+        <div className="empty-notifications">
+          <span>✓</span>
+          <p>Tudo em dia por aqui.</p>
+        </div>
       )}
     </aside>
   );
