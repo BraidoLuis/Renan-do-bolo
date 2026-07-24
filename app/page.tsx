@@ -137,6 +137,7 @@ type ProductRow = {
 type OrderCreationResult =
   | {
       success: true;
+      orderId: string;
       orderNumber: number;
     }
   | {
@@ -2961,6 +2962,20 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
   const [sent, setSent] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [paid, setPaid] = useState(false);
+  const [
+    paymentReturnLoading,
+    setPaymentReturnLoading,
+  ] = useState(false);
+
+  const [
+    paymentReturnError,
+    setPaymentReturnError,
+  ] = useState("");
+
+  const [
+    confirmedPaymentOrderNumber,
+    setConfirmedPaymentOrderNumber,
+  ] = useState<number | null>(null);
   const [reviewed, setReviewed] =
     useState(false);
 
@@ -3118,6 +3133,195 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
     }
   }, [section]);
 
+  useEffect(() => {
+    let active = true;
+
+    async function handleStripeReturn() {
+      const url =
+        new URL(window.location.href);
+
+      const paymentResult =
+        url.searchParams.get("payment");
+
+      const sessionId =
+        url.searchParams.get("session_id");
+
+      if (!paymentResult) {
+        return;
+      }
+
+      setSection("pagamento");
+
+      sessionStorage.setItem(
+        "doce-gestao-client-section",
+        "pagamento"
+      );
+
+      const savedCart =
+        sessionStorage.getItem(
+          "stripe-checkout-cart"
+        );
+
+      if (savedCart) {
+        try {
+          const parsedCart =
+            JSON.parse(savedCart) as CartItem[];
+
+          setPurchasedItems(parsedCart);
+
+          if (paymentResult === "cancelled") {
+            setCart(parsedCart);
+          }
+        } catch (cartError) {
+          console.error(
+            "Erro ao recuperar carrinho:",
+            cartError
+          );
+        }
+      }
+
+      if (paymentResult === "cancelled") {
+        setPaymentReturnError(
+          "O pagamento foi cancelado. Você pode tentar novamente."
+        );
+
+        window.history.replaceState(
+          {},
+          "",
+          window.location.pathname
+        );
+
+        return;
+      }
+
+      if (
+        paymentResult !== "success" ||
+        !sessionId
+      ) {
+        setPaymentReturnError(
+          "Não foi possível identificar o retorno do pagamento."
+        );
+
+        return;
+      }
+
+      setPaymentReturnLoading(true);
+      setPaymentReturnError("");
+
+      /*
+      * Aguarda o webhook confirmar o pagamento.
+      * O redirecionamento pode chegar antes dele.
+      */
+      for (
+        let attempt = 0;
+        attempt < 12;
+        attempt += 1
+      ) {
+        if (!active) {
+          return;
+        }
+
+        const {
+          data: payment,
+          error: paymentError,
+        } = await supabase
+          .from("payments")
+          .select(`
+            order_id,
+            status
+          `)
+          .eq(
+            "stripe_checkout_session_id",
+            sessionId
+          )
+          .maybeSingle();
+
+        if (paymentError) {
+          console.error(
+            "Erro ao verificar pagamento:",
+            paymentError
+          );
+        }
+
+        if (payment?.status === "paid") {
+          const {
+            data: order,
+            error: orderError,
+          } = await supabase
+            .from("orders")
+            .select("order_number")
+            .eq("id", payment.order_id)
+            .single();
+
+          if (orderError) {
+            console.error(
+              "Erro ao carregar pedido pago:",
+              orderError
+            );
+          }
+
+          if (!active) {
+            return;
+          }
+
+          const savedOrderNumber =
+            sessionStorage.getItem(
+              "stripe-checkout-order-number"
+            );
+
+          setConfirmedPaymentOrderNumber(
+            Number(
+              order?.order_number ||
+                savedOrderNumber ||
+                0
+            ) || null
+          );
+
+          setPaid(true);
+          setCart([]);
+
+          sessionStorage.removeItem(
+            "stripe-checkout-cart"
+          );
+
+          sessionStorage.removeItem(
+            "stripe-checkout-order-number"
+          );
+
+          await loadClientOrders();
+
+          setPaymentReturnLoading(false);
+
+          window.history.replaceState(
+            {},
+            "",
+            window.location.pathname
+          );
+
+          return;
+        }
+
+        await new Promise(resolve =>
+          setTimeout(resolve, 1000)
+        );
+      }
+
+      if (active) {
+        setPaymentReturnLoading(false);
+
+        setPaymentReturnError(
+          "O pagamento foi recebido e ainda está sendo confirmado. Aguarde alguns segundos e atualize a página."
+        );
+      }
+    }
+
+    handleStripeReturn();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   async function createOrderFromCart():
     Promise<OrderCreationResult> {
     if (cart.length === 0) {
@@ -3162,16 +3366,31 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
       }
 
       const createdOrder = data as {
+        order_id: string;
         order_number: number | string;
       };
 
-      setPurchasedItems(cart);
-      setPaid(true);
-      setCart([]);
-      await loadClientOrders();
+      if (!createdOrder.order_id) {
+        console.error(
+          "A função não retornou o ID do pedido:",
+          createdOrder
+        );
+
+        return {
+          success: false,
+          message:
+            "O pedido foi criado, mas seu identificador não foi retornado.",
+        };
+      }
+
+      // setPurchasedItems(cart);
+      // setPaid(true);
+      // setCart([]);
+      // await loadClientOrders();
 
       return {
         success: true,
+        orderId: createdOrder.order_id,
         orderNumber: Number(
           createdOrder.order_number
         ),
@@ -4126,7 +4345,18 @@ function ClientPortal({  userName,  products,  quotes,  onQuote,  unreadNotifica
             </form>
           </>
         )}
-        {section === "pagamento" && <Payment  paid={paid}  cart={paid ? purchasedItems : cart}  onPay={createOrderFromCart}/>}
+        {section === "pagamento" && (
+          <Payment
+            paid={paid}
+            cart={paid ? purchasedItems : cart}
+            onPay={createOrderFromCart}
+            returning={paymentReturnLoading}
+            returnError={paymentReturnError}
+            confirmedOrderNumber={
+              confirmedPaymentOrderNumber
+            }
+          />
+        )}
         {section === "avaliacao" && (
           <Review
             orders={reviewableOrders}
@@ -4300,8 +4530,29 @@ function MiniCart({ items, onClose, onQuantity, onCheckout, onCatalog }: { items
   );
 }
 
-function Payment({  paid,  cart,  onPay,}: {  paid: boolean;  cart: CartItem[];  onPay: () => Promise<OrderCreationResult>;}) {
-  const [method, setMethod] = useState("pix");
+function Payment({
+  paid,
+  cart,
+  onPay,
+  returning,
+  returnError,
+  confirmedOrderNumber,
+}: {
+  paid: boolean;
+  cart: CartItem[];
+  onPay: () => Promise<OrderCreationResult>;
+  returning: boolean;
+  returnError: string;
+  confirmedOrderNumber: number | null;
+}) {
+
+  const [
+    pendingOrder,
+    setPendingOrder,
+  ] = useState<{
+    id: string;
+    number: number;
+  } | null>(null);
 
   const [processing, setProcessing] =
   useState(false);
@@ -4309,26 +4560,136 @@ function Payment({  paid,  cart,  onPay,}: {  paid: boolean;  cart: CartItem[]; 
   const [paymentError, setPaymentError] =
     useState("");
 
-  const [
-    confirmedOrderNumber,
-    setConfirmedOrderNumber,
-  ] = useState<number | null>(null);
+async function confirmOrder() {
+  setPaymentError("");
+  setProcessing(true);
 
-  async function confirmOrder() {
-    setPaymentError("");
-    setProcessing(true);
+  try {
+    let order = pendingOrder;
 
-    const result = await onPay();
+    if (!order) {
+      const result = await onPay();
 
-    setProcessing(false);
+      if (!result.success) {
+        setPaymentError(result.message);
+        return;
+      }
 
-    if (!result.success) {
-      setPaymentError(result.message);
+      order = {
+        id: result.orderId,
+        number: result.orderNumber,
+      };
+
+      setPendingOrder(order);
+
+    }
+
+    const {
+      data,
+      error: checkoutError,
+    } = await supabase.functions.invoke(
+      "create-stripe-checkout",
+      {
+        body: {
+          orderId: order.id,
+        },
+      }
+    );
+
+    if (checkoutError) {
+      let errorMessage =
+        "Não foi possível abrir o pagamento seguro.";
+
+      try {
+        const errorContext =
+          (
+            checkoutError as {
+              context?: Response;
+            }
+          ).context;
+
+        if (errorContext) {
+          const errorBody =
+            await errorContext.clone().json();
+
+          console.error(
+            "Resposta da Edge Function:",
+            errorBody
+          );
+
+          if (errorBody?.error) {
+            errorMessage =
+              errorBody.error;
+          }
+        }
+      } catch (contextError) {
+        console.error(
+          "Não foi possível ler a resposta da função:",
+          contextError
+        );
+      }
+
+      console.error(
+        "Erro ao iniciar Checkout:",
+        checkoutError
+      );
+
+      setPaymentError(errorMessage);
       return;
     }
 
-    setConfirmedOrderNumber(
-      result.orderNumber
+    const checkoutUrl =
+      data?.url as string | undefined;
+
+    if (!checkoutUrl) {
+      console.error(
+        "URL do Checkout não recebida:",
+        data
+      );
+
+      setPaymentError(
+        data?.error ||
+          "A Stripe não retornou a página de pagamento."
+      );
+
+      return;
+    }
+    sessionStorage.setItem(
+      "stripe-checkout-cart",
+      JSON.stringify(cart)
+    );
+
+    sessionStorage.setItem(
+      "stripe-checkout-order-number",
+      String(order.number)
+    );
+
+    window.location.assign(checkoutUrl);
+  } catch (error) {
+    console.error(
+      "Erro inesperado no pagamento:",
+      error
+    );
+
+    setPaymentError(
+      "Ocorreu um erro ao iniciar o pagamento."
+    );
+  } finally {
+    setProcessing(false);
+  }
+}
+  if (returning) {
+    return (
+      <div className="success-state">
+        <span>⌛</span>
+
+        <h1>Confirmando pagamento...</h1>
+
+        <p>
+          Recebemos o retorno da Stripe e estamos
+          confirmando o pagamento do seu pedido.
+        </p>
+      </div>
     );
   }
 
@@ -4362,17 +4723,30 @@ function Payment({  paid,  cart,  onPay,}: {  paid: boolean;  cart: CartItem[]; 
         )}
 
         <p>
-          Seu pedido com{" "}
-          {checkoutItems.reduce(
-            (sum, item) =>
-              sum + item.quantity,
-            0
-          )}{" "}
-          {checkoutItems.length === 1
-            ? "item"
-            : "itens"}{" "}
-          foi recebido. A confeitaria já pode
-          iniciar a produção.
+          {checkoutItems.length > 0 ? (
+            <>
+              Seu pedido com{" "}
+              {checkoutItems.reduce(
+                (sum, item) =>
+                  sum + item.quantity,
+                0
+              )}{" "}
+              {checkoutItems.reduce(
+                (sum, item) =>
+                  sum + item.quantity,
+                0
+              ) === 1
+                ? "item"
+                : "itens"}{" "}
+              foi recebido. A confeitaria já pode
+              acompanhar a encomenda.
+            </>
+          ) : (
+            <>
+              Seu pagamento foi confirmado e o pedido
+              já está disponível para a confeitaria.
+            </>
+          )}
         </p>
 
         <Status>Confirmado</Status>
@@ -4386,22 +4760,37 @@ function Payment({  paid,  cart,  onPay,}: {  paid: boolean;  cart: CartItem[]; 
       <div className="payment-layout">
         <section className="panel payment-card">
           <h2>Forma de pagamento</h2>
-          <div className="payment-methods">
-            <button className={method === "pix" ? "active" : ""} onClick={() => setMethod("pix")}><span>◆</span><b>Pix</b><small>Aprovação imediata</small></button>
-            <button className={method === "card" ? "active" : ""} onClick={() => setMethod("card")}><span>▰</span><b>Cartão</b><small>Até 3x sem juros</small></button>
+          <div className="stripe-checkout-note">
+            <span>⌑</span>
+
+            <div>
+              <b>Pagamento seguro pela Stripe</b>
+
+              <p>
+                Na próxima página você poderá escolher
+                as formas de pagamento disponíveis.
+                Os dados financeiros serão informados
+                diretamente no ambiente da Stripe.
+              </p>
+            </div>
           </div>
-          {method === "pix" ? (
-            <div className="pix-box"><div className="qr-demo">▦</div><div><b>Escaneie o QR Code</b><p>Ou copie o código Pix para pagar no aplicativo do seu banco.</p><button>Copiar código Pix</button></div></div>
-          ) : (
-            <div className="form-grid card-fields"><label className="wide">Número do cartão<input placeholder="0000 0000 0000 0000" /></label><label>Validade<input placeholder="MM/AA" /></label><label>CVV<input placeholder="123" /></label><label className="wide">Nome no cartão<input placeholder="Como está no cartão" /></label></div>
-          )}
-          <button  className="confirm-payment"  disabled={processing}  onClick={confirmOrder}>  {processing    ? "Processando pedido..."    : `Confirmar pagamento de ${money(total)}`}</button>
-          {paymentError && (
+          <button
+            className="confirm-payment"
+            disabled={processing}
+            onClick={confirmOrder}
+          >
+            {processing
+              ? "Abrindo pagamento seguro..."
+              : `Pagar ${money(total)} com Stripe`}
+          </button>
+          {(paymentError || returnError) && (
             <p className="form-error">
-              {paymentError}
+              {paymentError || returnError}
             </p>
           )}
-          <small className="secure-note">⌑ Ambiente seguro • Pagamento demonstrativo</small>
+          <small className="secure-note">
+            ⌑ Pagamento processado pela Stripe
+          </small>
         </section>
         <aside className="panel order-summary">
           <h2>Resumo do pedido</h2>
